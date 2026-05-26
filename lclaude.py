@@ -74,6 +74,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -366,43 +367,64 @@ def ensure_model_in_ollama(model: str) -> list[str]:
     return installed
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _pad_visible(text: str, width: int) -> str:
+    return text + " " * max(0, width - _visible_len(text))
+
+
+def _box_top(title: str, width: int, border: str, reset: str) -> str:
+    """╭─── Title ───...──╮"""
+    inner = f"─── {title} "
+    fill = max(0, width - 2 - len(inner))
+    return f"{border}╭{inner}{'─' * fill}╮{reset}"
+
+
+def _box_row(content: str, width: int, border: str, reset: str) -> str:
+    """│ content          │"""
+    inner_w = width - 2
+    return f"{border}│{reset}{_pad_visible(content, inner_w)}{border}│{reset}"
+
+
+def _box_bottom(width: int, border: str, reset: str) -> str:
+    return f"{border}╰{'─' * (width - 2)}╯{reset}"
+
+
 def _print_header(ollama_ver: str, model: str, installed_models: list[str]) -> None:
-    """Print a decorative header showing Ollama version, selected model, and
-    all installed models — gives the user immediate confirmation of context."""
+    """Print a boxed header (Claude Code–style) with Ollama version, model, and
+    installed models."""
     cols, _ = shutil.get_terminal_size((80, 20))
+    width = max(cols, 40)
+    inner_w = width - 2
+
     dim = "\x1b[2m"
     reset = "\x1b[0m"
-    cyan = "\x1b[36m"
-    green = "\x1b[92m"
+    accent = "\x1b[92m"  # bright green — border and highlighted values
+    border = accent
+    value = accent
 
-    bar = dim + "-" * cols + reset
-    print(bar, file=sys.stdout)
-    line = (
-        " "
-        + dim
-        + cyan
-        + "LCLAUDE"
-        + reset
-        + dim
-        + "   Ollama: "
-        + green
-        + "v"
-        + ollama_ver
-        + reset
-        + dim
-        + "  Model: "
-        + green
-        + model
-        + reset
+    title = "LCLAUDE"
+    ollama_line = (
+        f" {dim}Ollama:{reset} {value}v{ollama_ver}{reset}"
+        f"  {dim}Model:{reset} {value}{model}{reset}"
     )
-    print(line, file=sys.stdout)
 
     models_str = ", ".join(installed_models)
-    print(
-        " " + dim + "Models: " + reset + models_str,
-        file=sys.stdout,
-    )
-    print(bar, file=sys.stdout)
+    models_prefix = f" {dim}Models:{reset} "
+    max_models = inner_w - _visible_len(models_prefix)
+    if _visible_len(models_str) > max_models:
+        models_str = models_str[: max(0, max_models - 1)] + "…"
+    models_line = models_prefix + models_str
+
+    print(_box_top(title, width, border, reset), file=sys.stdout)
+    print(_box_row(ollama_line, width, border, reset), file=sys.stdout)
+    print(_box_row(models_line, width, border, reset), file=sys.stdout)
+    print(_box_bottom(width, border, reset), file=sys.stdout)
 
 
 def main(argv: list[str]) -> int:

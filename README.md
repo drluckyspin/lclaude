@@ -1,15 +1,17 @@
-# lclaude
+# LCLAUDE
+
+![alt text](screenshot.png)
 
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against a local [Ollama](https://ollama.com) model instead of the Anthropic cloud API.
 
-`lclaude` is a small Python wrapper that:
+`lclaude` (local claude) is a small Python wrapper that:
 
-- Verifies Ollama is installed and running (and starts `ollama serve` if needed)
+- Verifies [Ollama](https://ollama.com) is installed and running (and starts `ollama serve` if needed)
 - Confirms the requested model is pulled before launching
-- Routes Claude Code traffic to `http://localhost:11434` (Ollama’s Anthropic-compatible endpoint)
 - Temporarily patches `~/.claude/settings.json` to be optimal for local models, then restores your settings on exit
+- Routes Claude Code traffic to `http://localhost:11434` (Ollama’s Anthropic-compatible endpoint)
 
-No third-party Python packages — stdlib only (Python 3.11+).
+Requires no third-party Python packages — `stdlib` only (Python 3.11+).
 
 ## Prerequisites
 
@@ -71,6 +73,9 @@ lclaude --help
 ```
 
 On startup, `lclaude` prints a short banner with Ollama version, the selected model, and installed models.
+
+> [!TIP]
+> **Tip:** The first time you run `lclaude` it may take some time to load the model into memory. Follow on calls get increasingly faster.
 
 ## How it works
 
