@@ -169,6 +169,15 @@ def apply_attribution_patch() -> None:
     if not isinstance(env, dict):
         env = {}
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+    for key in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "PORTKEY_API_KEY",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+    ):
+        env.pop(key, None)
     data["env"] = env
     save_settings(SETTINGS, data)
 
