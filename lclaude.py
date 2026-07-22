@@ -230,7 +230,12 @@ def run_claude(
         # if the process is killed by the signal.
         restore_settings()
         if ollama_ver is not None:
-            _set_terminal_title("")
+            # Clear terminal title using os.write (async-signal-safe) instead
+            # of sys.stdout.write/flush which can deadlock in a signal handler.
+            try:
+                os.write(sys.stdout.fileno(), b"\x1b]0;\x07")
+            except OSError:
+                pass
         os._exit(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
