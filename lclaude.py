@@ -54,7 +54,9 @@
 #       then sets ``CLAUDE_CODE_ATTRIBUTION_HEADER=0`` in the settings file.
 #   4.  Sets ``ANTHROPIC_AUTH_TOKEN=ollama`` and
 #       ``ANTHROPIC_BASE_URL=http://localhost:11434`` in the environment,
-#       then exec's ``claude --model <model>`` with the remaining args.
+#       disables Claude's alternate-screen (fullscreen) TUI so the header
+#       stays visible, then runs ``claude --model <model>`` with the
+#       remaining args.
 #   5.  On exit (normal, signal, or interrupt) the original settings file is
 #       restored and the backup is deleted.
 #
@@ -93,6 +95,12 @@ SETTINGS_OFF = SETTINGS.with_name(SETTINGS.name + ".off")
 CLAUDE_ENV = {
     "ANTHROPIC_AUTH_TOKEN": "ollama",
     "ANTHROPIC_BASE_URL": "http://localhost:11434",
+    # Since v2.1.89 Claude Code defaults to a fullscreen alternate-screen TUI
+    # that wipes anything printed on the main buffer (our header) as soon as
+    # claude starts.  CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN keeps Claude on the
+    # main screen so the lclaude box stays in scrollback and native
+    # selection / copy-paste / Cmd-F keep working.
+    "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
 }
 
 # Seconds to wait for ``ollama serve`` to accept connections after launch
@@ -185,21 +193,56 @@ def build_child_env() -> dict[str, str]:
     return env
 
 
-def run_claude(claude_argv: list[str], model: str) -> int:
+def _is_print_mode(claude_argv: list[str]) -> bool:
+    """True when Claude is in -p/--print mode (stdout must stay clean)."""
+    for arg in claude_argv:
+        if arg in ("-p", "--print") or arg.startswith("--print="):
+            return True
+    return False
+
+
+def _set_terminal_title(title: str) -> None:
+    """Set the terminal tab/window title (survives Claude's full-screen TUI)."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(f"\x1b]0;{title}\x07")
+    sys.stdout.flush()
+
+
+def run_claude(
+    claude_argv: list[str],
+    model: str,
+    *,
+    ollama_ver: str | None = None,
+) -> int:
     """Run ``claude --model <model>`` with Ollama env vars, settings backup, and
     signal-safe cleanup.
 
-    Signals (SIGTERM/SIGHUP) can arrive between ``subprocess.run`` and the
-    ``finally`` block that restores settings.  ``on_signal`` handles cleanup
-    directly in the signal handler to avoid undefined behaviour in ``os._exit``.
+    Claude Code owns the TTY directly (no PTY shim) so mouse selection and
+    copy/paste keep working. Session context is kept in the terminal tab title
+    because Claude's redraw clears anything printed above it.
     """
     ensure_settings_file()
     backup_settings()
+
+    interactive = (
+        sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and not _is_print_mode(claude_argv)
+        and ollama_ver is not None
+    )
 
     def on_signal(signum: int, _frame: Any) -> None:
         # Settings restore must happen here — ``finally`` may never run
         # if the process is killed by the signal.
         restore_settings()
+        if interactive:
+            # Clear terminal title using os.write (async-signal-safe) instead
+            # of sys.stdout.write/flush which can deadlock in a signal handler.
+            try:
+                os.write(sys.stdout.fileno(), b"\x1b]0;\x07")
+            except OSError:
+                pass
         os._exit(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -207,12 +250,16 @@ def run_claude(claude_argv: list[str], model: str) -> int:
 
     try:
         apply_attribution_patch()
+        if interactive:
+            _set_terminal_title(f"lclaude · {model} · Ollama v{ollama_ver}")
         return subprocess.run(
             ["claude", "--model", model, *claude_argv],
             env=build_child_env(),
             check=False,
         ).returncode
     finally:
+        if interactive:
+            _set_terminal_title("")
         restore_settings()
 
 
@@ -474,8 +521,11 @@ def main(argv: list[str]) -> int:
         print(help_text, file=sys.stdout)
         return 0
 
-    _print_header(_OLLAMA_VERSION, model, installed_models)
-    return run_claude(claude_argv, model)
+    # Show a startup banner only when connected to a real terminal.
+    # Session context also lives in the terminal tab title while Claude runs.
+    if sys.stdout.isatty() and not _is_print_mode(claude_argv):
+        _print_header(_OLLAMA_VERSION, model, installed_models)
+    return run_claude(claude_argv, model, ollama_ver=_OLLAMA_VERSION)
 
 
 if __name__ == "__main__":
