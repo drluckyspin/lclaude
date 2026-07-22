@@ -82,7 +82,7 @@ Since Claude Code v2.1.89 defaults to a fullscreen alternate-screen TUI that wou
 preserves the header in scrollback and keeps native text selection, copy/paste, and `Cmd+F` working.
 
 > [!TIP]
-> **Tip:** The first time you run `lclaude` it may take some time to load the model into memory. Follow on calls get
+> **Tip:** The first time you run `lclaude` it may take some time to load the model into memory. Follow-on calls get
 > increasingly faster.
 
 ## How it works

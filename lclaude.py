@@ -96,8 +96,8 @@ CLAUDE_ENV = {
     "ANTHROPIC_AUTH_TOKEN": "ollama",
     "ANTHROPIC_BASE_URL": "http://localhost:11434",
     # Since v2.1.89 Claude Code defaults to a fullscreen alternate-screen TUI
-    # (CLAUDE_CODE_NO_FLICKER).  That wipes anything printed on the main buffer
-    # (our header) as soon as claude starts.  Disabling it keeps Claude on the
+    # that wipes anything printed on the main buffer (our header) as soon as
+    # claude starts.  CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN keeps Claude on the
     # main screen so the lclaude box stays in scrollback and native
     # selection / copy-paste / Cmd-F keep working.
     "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
@@ -225,11 +225,18 @@ def run_claude(
     ensure_settings_file()
     backup_settings()
 
+    interactive = (
+        sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and not _is_print_mode(claude_argv)
+        and ollama_ver is not None
+    )
+
     def on_signal(signum: int, _frame: Any) -> None:
         # Settings restore must happen here — ``finally`` may never run
         # if the process is killed by the signal.
         restore_settings()
-        if ollama_ver is not None:
+        if interactive:
             # Clear terminal title using os.write (async-signal-safe) instead
             # of sys.stdout.write/flush which can deadlock in a signal handler.
             try:
@@ -240,13 +247,6 @@ def run_claude(
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
-
-    interactive = (
-        sys.stdin.isatty()
-        and sys.stdout.isatty()
-        and not _is_print_mode(claude_argv)
-        and ollama_ver is not None
-    )
 
     try:
         apply_attribution_patch()
@@ -521,9 +521,9 @@ def main(argv: list[str]) -> int:
         print(help_text, file=sys.stdout)
         return 0
 
-    # Show a startup banner (Claude may clear it when its TUI starts).
+    # Show a startup banner only when connected to a real terminal.
     # Session context also lives in the terminal tab title while Claude runs.
-    if not _is_print_mode(claude_argv):
+    if sys.stdout.isatty() and not _is_print_mode(claude_argv):
         _print_header(_OLLAMA_VERSION, model, installed_models)
     return run_claude(claude_argv, model, ollama_ver=_OLLAMA_VERSION)
 
