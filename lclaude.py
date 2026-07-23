@@ -109,6 +109,9 @@ CLAUDE_ENV = {
 # Seconds to wait for ``ollama serve`` to accept connections after launch
 OLLAMA_STARTUP_TIMEOUT = 30
 
+# Seconds to wait for ``ollama list`` to complete
+OLLAMA_LIST_TIMEOUT = 15
+
 # ANSI accent shared by the status box and help-section headings
 HEADER_ACCENT = "\x1b[92m"
 ANSI_RESET = "\x1b[0m"
@@ -370,6 +373,22 @@ def _start_and_wait(ollama_bin: str) -> tuple[bool, str | None]:
     return (False, f"ollama did not become ready within {OLLAMA_STARTUP_TIMEOUT}s")
 
 
+def list_ollama_models() -> int:
+    """Print the raw ``ollama list`` output and return its exit status."""
+    try:
+        return subprocess.run(
+            ["ollama", "list"],
+            check=False,
+            timeout=OLLAMA_LIST_TIMEOUT,
+        ).returncode
+    except subprocess.TimeoutExpired:
+        print(
+            f"Error: `ollama list` timed out after {OLLAMA_LIST_TIMEOUT}s",
+            file=sys.stderr,
+        )
+        return 1
+
+
 def ensure_model_in_ollama(model: str) -> list[str]:
     """Validate that ollama has the requested model installed.
 
@@ -384,7 +403,7 @@ def ensure_model_in_ollama(model: str) -> list[str]:
         ["ollama", "list"],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=OLLAMA_LIST_TIMEOUT,
     )
     if result.returncode != 0:
         print(
@@ -424,6 +443,11 @@ def ensure_model_in_ollama(model: str) -> list[str]:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _use_color() -> bool:
+    """Return whether stdout supports and allows ANSI color output."""
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
 def _visible_len(text: str) -> int:
     return len(_ANSI_RE.sub("", text))
 
@@ -456,10 +480,13 @@ def _print_header(ollama_ver: str, model: str, installed_models: list[str]) -> N
     width = max(cols, 40)
     inner_w = width - 2
 
-    dim = "\x1b[2m"
-    reset = ANSI_RESET
-    border = HEADER_ACCENT
-    value = HEADER_ACCENT
+    if _use_color():
+        dim = "\x1b[2m"
+        reset = ANSI_RESET
+        border = HEADER_ACCENT
+        value = HEADER_ACCENT
+    else:
+        dim = reset = border = value = ""
 
     title = "LCLAUDE"
     ollama_line = (
@@ -503,7 +530,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     if args.list:
-        return subprocess.run(["ollama", "list"], check=False).returncode
+        return list_ollama_models()
 
     # Validate the model is pulled; also capture installed model list for display
     installed_models = ensure_model_in_ollama(model)
@@ -511,12 +538,12 @@ def main(argv: list[str]) -> int:
     if is_help:
         logger.info("showing help")
         _print_header(_OLLAMA_VERSION, model, installed_models)
-        heading = HEADER_ACCENT
-        reset = ANSI_RESET
+        heading = HEADER_ACCENT if _use_color() else ""
+        reset = ANSI_RESET if heading else ""
         help_text = (
             f"{heading}Usage:{reset} lclaude [OPTIONS] [ARGS passed to claude]\n"
             "\n"
-            "Run Claude Code against a local Ollama served LLM\n"
+            "Run Claude Code against a locally served Ollama LLM\n"
             "\n"
             f"{heading}Options:{reset}\n"
             "  -h, --help           Show this help message and exit\n"
