@@ -32,10 +32,10 @@ Requires no third-party Python packages — `stdlib` only (Python 3.11+).
    chmod +x ~/bin/lclaude
    ```
 
-2. Pull a model (default is `qwen3.6`):
+2. Pull the default model (`ornith:35b`):
 
    ```bash
-   ollama pull qwen3.6
+   ollama pull ornith:35b
    ```
 
    See [coding-oriented models on Ollama](https://ollama.com/search?q=coding) for alternatives. Use `ollama list` to see
@@ -49,7 +49,7 @@ Requires no third-party Python packages — `stdlib` only (Python 3.11+).
 
 ## Usage
 
-**Default model (`qwen3.6`):**
+**Default model (`ornith:35b`):**
 
 ```bash
 lclaude
@@ -58,8 +58,14 @@ lclaude
 **Choose a model:**
 
 ```bash
-lclaude --model gemma4
-lclaude --model qwen3:latest
+lclaude --model ornith
+lclaude --model ornith:35b
+```
+
+**List available models:**
+
+```bash
+lclaude --list
 ```
 
 **Pass arguments through to `claude`:**
@@ -89,7 +95,8 @@ preserves the header in scrollback and keeps native text selection, copy/paste, 
 
 1. Checks that `ollama` is on `PATH` and the server responds on port `11434` (starts `ollama serve` in the background if
    needed).
-2. Runs `ollama list` and exits with a clear error if `--model` is not installed.
+2. Runs `ollama list` and exits with a clear error if `--model` is not installed. Use `lclaude --list` to print the
+   available models without launching Claude Code.
 3. Backs up `~/.claude/settings.json` to `settings.json.off`, sets `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, then launches:
 
    ```text
