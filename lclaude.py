@@ -1281,7 +1281,6 @@ def main(argv: list[str]) -> int:
     show_header = (
         sys.stdout.isatty()
         and not _is_print_mode(claude_argv)
-        and not is_help
     )
 
     if backend == BACKEND_OLLAMA:
@@ -1313,7 +1312,7 @@ def main(argv: list[str]) -> int:
             return 1
 
     elif backend == BACKEND_HYBRID:
-        # --list / --help only need Ollama; do not start llama-server
+        # --list only needs Ollama; do not start llama-server
         ok, reason = check_ollama(DEFAULT_PORTS[BACKEND_OLLAMA], auto_start=True)
         if not ok:
             print(f"Error: {reason}", file=sys.stderr)
@@ -1324,75 +1323,18 @@ def main(argv: list[str]) -> int:
 
         installed_models = ensure_model_in_ollama(model)
 
-        if not is_help:
-            # Show the banner before starting llama-server so failures still
-            # appear under a familiar LCLAUDE header.
-            if show_header:
-                _print_header(
-                    backend,
-                    "…",
-                    model,
-                    port,
-                    installed_models,
-                    log_file=LLAMACPP_LOG_FILE,
-                )
-            server_proc = prepare_hybrid_backend(model, port)
-
-    # --- Help ---
-    if is_help:
-        logger.info("showing help")
-        _print_header(
-            backend,
-            _BACKEND_VERSION,
-            model,
-            port,
-            installed_models,
-            log_file=(
-                LLAMACPP_LOG_FILE
-                if backend == BACKEND_HYBRID and server_proc is not None
-                else None
-            ),
-        )
-        heading = HEADER_ACCENT if _use_color() else ""
-        reset = ANSI_RESET if heading else ""
-        help_text = (
-            f"{heading}Usage:{reset} lclaude [OPTIONS] [ARGS passed to claude]\n"
-            "\n"
-            "Run Claude Code against a local LLM (Ollama, llama.cpp, or hybrid)\n"
-            "\n"
-            f"{heading}Options:{reset}\n"
-            "  -h, --help           Show this help message and exit\n"
-            "  --backend BACKEND    ollama, llamacpp, hybrid, or auto (default: auto)\n"
-            "  --port PORT          Override backend port (default: 11434/8080/9090)\n"
-            "  --list               List models available in Ollama and exit\n"
-            "  --model MODEL        Model to use (default: ornith:35b)\n"
-            "                       Ollama/hybrid: must be pulled. llama.cpp: label.\n"
-            "\n"
-            f"{heading}Examples (Ollama):{reset}\n"
-            "  lclaude                          # auto-detect, default model\n"
-            "  lclaude --model ornith           # use the model's base name\n"
-            "  lclaude --model ornith:35b       # with a specific tag\n"
-            "  lclaude --list                   # list available Ollama models\n"
-            "\n"
-            f"{heading}Examples (hybrid — Ollama models + llama-server):{reset}\n"
-            "  lclaude --backend hybrid         # auto-start llama-server from Ollama blob\n"
-            "  lclaude --backend hybrid --model ornith:35b\n"
-            f"  tail -f {LLAMACPP_LOG_FILE}   # watch hybrid llama-server logs\n"
-            "\n"
-            f"{heading}Examples (llama.cpp):{reset}\n"
-            "  lclaude --backend llamacpp       # use llama-server on :8080\n"
-            "  lclaude --backend llamacpp --port 9090  # custom port\n"
-            "  lclaude --backend llamacpp --model my-model  # cosmetic name\n"
-            "\n"
-            f"{heading}Prerequisites:{reset}\n"
-            "  brew install claude-code         # install Claude Code CLI\n"
-            "  brew install ollama              # install Ollama\n"
-            "  ollama pull ornith:35b           # pull a model for Ollama/hybrid\n"
-            "  brew install llama.cpp           # install llama.cpp (llamacpp/hybrid)\n"
-            "  llama-server -m model.gguf       # start llama-server with a GGUF\n"
-        )
-        print(help_text, file=sys.stdout)
-        return 0
+        # Show the banner before starting llama-server so failures still
+        # appear under a familiar LCLAUDE header.
+        if show_header:
+            _print_header(
+                backend,
+                "…",
+                model,
+                port,
+                installed_models,
+                log_file=LLAMACPP_LOG_FILE,
+            )
+        server_proc = prepare_hybrid_backend(model, port)
 
     # Show a startup banner only when connected to a real terminal.
     # Session context also lives in the terminal tab title while Claude runs.
