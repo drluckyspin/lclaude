@@ -25,7 +25,7 @@
 #           cp lclaude.py ~/bin/lclaude
 #           chmod +x ~/bin/lclaude
 #   2.  Pull a model you want to use:
-#           ollama pull qwen3.6
+#           ollama pull ornith:35b
 #       See ``ollama list`` to check which models are already installed.
 #       Other suitable models here: https://ollama.com/search?q=coding
 #   3.  Add an alias to your shell config (~/.zshrc, ~/.bashrc, etc.):
@@ -33,12 +33,15 @@
 #       Then reload: ``source ~/.zshrc`` (or restart your terminal).
 #
 # Usage
-#   Basic (uses default model qwen3.6):
+#   Basic (uses default model ornith:35b):
 #       lclaude
 #
 #   Choose a specific model:
-#       lclaude --model gemma4
-#       lclaude --model qwen3:latest
+#       lclaude --model ornith:35b
+#       lclaude --model ornith
+#
+#   List models available in Ollama:
+#       lclaude --list
 #
 #   Pass arguments through to ``claude``:
 #       lclaude --system "You are a helpful assistant" --message "Hello"
@@ -105,6 +108,10 @@ CLAUDE_ENV = {
 
 # Seconds to wait for ``ollama serve`` to accept connections after launch
 OLLAMA_STARTUP_TIMEOUT = 30
+
+# ANSI accent shared by the status box and help-section headings
+HEADER_ACCENT = "\x1b[92m"
+ANSI_RESET = "\x1b[0m"
 
 # Cached ollama version from the last pre-flight check (module-level singleton)
 _OLLAMA_VERSION: str = "unknown"
@@ -369,9 +376,9 @@ def ensure_model_in_ollama(model: str) -> list[str]:
     Returns the list of installed model names (without tags) for display.
 
     Matching logic (in order of precedence):
-      1. Exact full match against ``ollama list`` output (e.g. "qwen3.6:latest")
+      1. Exact full match against ``ollama list`` output (e.g. "ornith:35b")
       2. Base name match — strips the tag from *model* and checks against
-         the base name column (e.g. "qwen3.6" matches "qwen3.6:latest")
+         the base name column (e.g. "ornith" matches "ornith:35b")
     """
     result = subprocess.run(
         ["ollama", "list"],
@@ -450,10 +457,9 @@ def _print_header(ollama_ver: str, model: str, installed_models: list[str]) -> N
     inner_w = width - 2
 
     dim = "\x1b[2m"
-    reset = "\x1b[0m"
-    accent = "\x1b[92m"  # bright green — border and highlighted values
-    border = accent
-    value = accent
+    reset = ANSI_RESET
+    border = HEADER_ACCENT
+    value = HEADER_ACCENT
 
     title = "LCLAUDE"
     ollama_line = (
@@ -479,7 +485,12 @@ def main(argv: list[str]) -> int:
 
     # Parse only our flags; pass the rest through verbatim to claude
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--model", default="qwen3.6")
+    parser.add_argument("--model", default="ornith:35b")
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List models available in Ollama and exit.",
+    )
     args, claude_argv = parser.parse_known_args(argv)
     model = args.model
 
@@ -491,32 +502,39 @@ def main(argv: list[str]) -> int:
         logger.error("pre-flight failed — %s", reason)
         return 1
 
+    if args.list:
+        return subprocess.run(["ollama", "list"], check=False).returncode
+
     # Validate the model is pulled; also capture installed model list for display
     installed_models = ensure_model_in_ollama(model)
 
     if is_help:
         logger.info("showing help")
         _print_header(_OLLAMA_VERSION, model, installed_models)
+        heading = HEADER_ACCENT
+        reset = ANSI_RESET
         help_text = (
-            "Usage: lclaude [OPTIONS] [ARGS passed to claude]\n"
+            f"{heading}Usage:{reset} lclaude [OPTIONS] [ARGS passed to claude]\n"
             "\n"
-            "Run Claude Code against a local Ollama instance.\n"
+            "Run Claude Code against a local Ollama served LLM\n"
             "\n"
-            "Options:\n"
-            "  -h, --help           Show this help message and exit.\n"
-            "  --model MODEL        Ollama model to use (default: qwen3.6).\n"
-            "                       Run ``ollama list`` to see installed models.\n"
+            f"{heading}Options:{reset}\n"
+            "  -h, --help           Show this help message and exit\n"
+            "  --list               List models available in Ollama and exit\n"
+            "  --model MODEL        Ollama model to use (default: ornith:35b)\n"
+            "                       Run ``lclaude --list`` to see installed models\n"
             "\n"
-            "Examples:\n"
-            "  lclaude                          # uses default model (qwen3.6)\n"
-            "  lclaude --model gemmat           # use a different model\n"
-            "  lclaude --model qwen3:latest     # with a specific tag\n"
-            '  lclaude --system "You are a helpful assistant --message "Hello"\n'
+            f"{heading}Examples:{reset}\n"
+            "  lclaude                          # uses default model (ornith:35b)\n"
+            "  lclaude --model ornith           # use the model's base name\n"
+            "  lclaude --model ornith:35b       # with a specific tag\n"
+            "  lclaude --list                   # list available models\n"
+            '  lclaude --system "You are a helpful assistant" --message "Hello"\n'
             "\n"
-            "Prerequisites:\n"
+            f"{heading}Prerequisites:{reset}\n"
             "  brew install ollama              # install Ollama\n"
-            "  ollama pull qwen3.6              # pull a model\n"
-            "  brew install claude-code         # install claude CLI\n"
+            "  ollama pull ornith:35b           # pull a model\n"
+            "  brew install claude-code         # install Claude Code CLI\n"
         )
         print(help_text, file=sys.stdout)
         return 0
