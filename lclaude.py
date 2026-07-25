@@ -243,7 +243,7 @@ def apply_attribution_patch() -> None:
     save_settings(SETTINGS, data)
 
 
-def build_child_env(backend: str, port: int) -> dict[str, str]:
+def build_child_env(_backend: str, port: int) -> dict[str, str]:
     """Build the environment for the claude subprocess.
 
     Start from the parent env, inject backend routing vars, and strip
@@ -1131,7 +1131,10 @@ def resolve_backend(
       4. None
     """
     ok_cpp, ver_cpp = _is_llamacpp_reachable(llamacpp_port)
-    if ok_cpp or ver_cpp == "loading":
+    if (
+        (ok_cpp or ver_cpp == "loading")
+        and not _llamacpp_template_rejects_late_system_messages(llamacpp_port)
+    ):
         return BACKEND_LLAMACPP
 
     if _model_needs_template_patch(model) and shutil.which("llama-server"):

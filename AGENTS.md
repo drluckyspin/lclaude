@@ -185,8 +185,7 @@ managed-server cleanup.
 - Progress belongs on stderr so `--json` keeps stdout machine-readable; show milestones and a TTY spinner unless the
   user passes `--quiet`. Keep normal mode concise (one spinner per backend); `--verbose` may show setup, warmup, and
   per-request progress. Normal milestones are `Running benchmarks`, `Running <backend> benchmarks`, and
-  `Rendering
-  results`
+  `Rendering results`
 - Managed-server ownership belongs to the benchmark only while its suite is running; always terminate it unless the user
   explicitly requests `--keep-managed`
 - The default benchmark is a fixed, staged workload suite: quick latency, Makefile generation, and a larger Makefile

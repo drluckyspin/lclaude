@@ -258,8 +258,7 @@ each workload/backend result. Both backends finish setup, then run discarded war
 displayed request measurements. The normal benchmark intentionally does not stop Ollama.
 
 While it runs, the default view keeps one spinner on each backend and prints compact `Running benchmarks`,
-`Running
-Ollama benchmarks`, and `Running Managed llama.cpp benchmarks` milestones. Pass `-v` / `--verbose` to include
+`Running Ollama benchmarks`, and `Running Managed llama.cpp benchmarks` milestones. Pass `-v` / `--verbose` to include
 server setup, warmups, and individual-run progress. Progress goes to stderr so JSON on stdout stays machine-readable;
 with `--json`, the `LCLAUDE-BENCH` header also goes to stderr. Without `--json`, that header and human results go to
 stdout.
