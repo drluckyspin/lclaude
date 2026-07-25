@@ -2,49 +2,29 @@
 
 ![alt text](screenshot.png)
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against a **local** LLM instead of the Anthropic
-cloud API.
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against a **local** LLM instead of the Anthropic cloud
+API.
 
 `lclaude` (local claude) is a single-file Python wrapper (**stdlib only**, **Python 3.11+**) that points the Claude Code
 CLI at Ollama, llama.cpp, or both. No proxy process, no extra dependencies — just env vars and a thin pre-flight.
 
-| Backend | Role | Default port |
-| ------- | ---- | ------------ |
-| **Ollama** | Model registry + inference | 11434 |
-| **llama.cpp** (`llama-server`) | User-managed GGUF server | 8080 |
-| **hybrid** | Ollama for models, llama-server for inference | 9090 |
-
-With `--backend auto` (default), lclaude probes Ollama then llama-server and uses whichever responds.
-
 ## What is Claude Code?
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic’s agentic coding CLI. It reads your repo,
-runs tools (edit files, shell, search), and talks to a model over the **Anthropic Messages API**
-(`POST /v1/messages`). Out of the box it expects Anthropic’s cloud. Both [Ollama](https://ollama.com/) and
+runs tools (edit files, shell, search), and talks to a model over the **Anthropic Messages API** (`POST /v1/messages`).
+Out of the box it expects Anthropic’s cloud. Both [Ollama](https://ollama.com/) and
 [llama.cpp](https://github.com/ggml-org/llama.cpp)’s `llama-server` can speak that same API on localhost — so Claude
 Code can drive a local model if you redirect `ANTHROPIC_BASE_URL` and auth.
-
-## What is Ollama? What is llama.cpp?
-
-[Ollama](https://ollama.com/) is the easy local model manager: `ollama pull`, `ollama list`, and a server on
-`:11434`. Great for day-to-day use; chat templates and GGUF details stay mostly hidden.
-
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) is a fast OpenAI-/Anthropic-compatible HTTP server
-over GGUF weights. You control quants, GPU layers, context, and — critically — the **chat template**. Some models
-(notably Ornith / Qwen 3.6) need a Claude-friendly template for tool use to work.
-
-**hybrid** mode uses both: Ollama as the model registry, llama-server for inference, with lclaude wiring the blob path
-and template automatically.
 
 ## Why this project?
 
 Claude Code is excellent, but cloud-only by default. Local runners already speak the Anthropic API; what’s missing is
-the glue: pick a backend, validate the model, fix chat-template footguns, set the right env vars, keep the UI banner
-visible, and clean up on exit.
+the glue: pick a sensible backend, validate the model, fix chat-template footguns, set the right env vars, keep the UI
+banner visible, remember your last prefs, and clean up on exit.
 
-lclaude is that glue in one script you can drop on `PATH`. Teams that already use Ollama keep `ollama pull`. People who
-want llama.cpp performance (or a working Ornith template) get it without maintaining a separate launcher. Hybrid mode
-is the “best of both” path when you want registry convenience and llama.cpp inference.
+lclaude is that glue in one script you can drop on `PATH`. Type `lclaude --model ornith` and it does the right thing.
+Teams that already use Ollama keep `ollama pull`. When llama.cpp is available and a model needs a Claude-friendly
+template (Ornith / Qwen 3.x), lclaude can manage that path for you — without a long command line every time.
 
 ## How it works
 
@@ -54,144 +34,110 @@ lclaude (setup)  →  claude (CLI)  →  Ollama :11434
                        POST /v1/messages
 ```
 
-1. Resolve backend (`auto` probes Ollama, then llama-server).
-2. Pre-flight: start/validate the server, check the model, patch the chat template when needed (hybrid).
-3. Point Claude Code at localhost (`ANTHROPIC_BASE_URL` + dummy token; strip `ANTHROPIC_API_KEY`).
-4. On exit / signal: restore `~/.claude/settings.json` and stop any llama-server lclaude started.
+With `--backend auto` (default), lclaude chooses in this order:
+
+1. A healthy (or still-loading) user-managed `llama-server` on the llama.cpp port (default **8080**)
+2. Else, for models that need a Claude template patch (Ornith / Qwen 3.x), if `llama-server` is on `PATH` and Ollama has
+   the model → **Managed llama.cpp** mode (spawn llama-server from the Ollama blob on **9090**, patched template)
+3. Else Ollama (auto-start `ollama serve` if needed)
+4. Else a short error with next steps
+
+Then it points Claude Code at localhost (`ANTHROPIC_BASE_URL` + dummy token; strips `ANTHROPIC_API_KEY`), and on exit
+restores `~/.claude/settings.json` and stops any llama-server it started.
 
 No proxy — traffic goes straight from `claude` to the local Anthropic-compatible endpoint.
 
-## Quick Start
-
-### Ollama (simplest)
+## Quick start
 
 ```bash
 brew install ollama claude-code
+# optional, for Managed llama.cpp Ornith/Qwen template fixes:
+# brew install llama.cpp
+
 ollama pull ornith:35b
 cp lclaude.py ~/bin/lclaude && chmod +x ~/bin/lclaude
+
 lclaude
+# or:
+lclaude --model ornith:35b
 ```
 
-### Hybrid (recommended for Ornith + llama.cpp)
-
-Ollama manages models; lclaude starts llama-server from the Ollama blob, auto-fixes chat templates, and tears the
-server down on exit.
-
-```bash
-brew install ollama llama.cpp claude-code
-ollama pull ornith:35b
-lclaude --backend hybrid --model ornith:35b
-```
-
-Server log (follow in another terminal):
-
-```bash
-tail -f ~/.cache/lclaude/llama-server.log
-```
-
-### llama.cpp (you manage the server)
-
-```bash
-# Terminal 1 — Ornith needs a Claude-compatible chat template (not plain --jinja)
-mkdir -p ~/.cache/lclaude
-curl -L https://huggingface.co/spiritbuun/buun-Qwen3.6-chat_template/raw/main/chat_template.jinja \
-  -o ~/.cache/lclaude/qwen3.6-claude.jinja
-llama-server -hf deepreinforce-ai/Ornith-1.0-35B-GGUF \
-  --chat-template-file ~/.cache/lclaude/qwen3.6-claude.jinja --port 8080
-
-# Terminal 2
-lclaude --backend llamacpp --model ornith:35b
-```
+That’s it. After a successful start, prefs are saved under `~/.config/lclaude/config.toml` so the next bare `lclaude`
+reuses your last model (and still runs `auto` magic unless you pinned a backend).
 
 > [!NOTE]
-> Ornith’s embedded Qwen 3.6 template rejects system messages after the first turn — that breaks Claude Code tool use.
-> **hybrid** patches this automatically. For a manual `llama-server`, always use `--chat-template-file` as above.
+> Ornith’s embedded Qwen 3.6 template rejects system messages after the first turn — that breaks Claude Code tool use
+> with a stock `llama-server --jinja`. **auto** / **managed** patch this automatically when llama.cpp is installed. For
+> a manual `llama-server`, always pass `--chat-template-file` (see below).
 
-## Installation
+## Config (last used)
 
-1. Put the script on your `PATH`:
+Path: `~/.config/lclaude/config.toml`
 
-   ```bash
-   cp lclaude.py ~/bin/lclaude
-   chmod +x ~/bin/lclaude
-   ```
+Created/updated after a successful backend start. Example:
 
-2. Install **Claude Code** (`brew install claude-code` or [docs](https://docs.anthropic.com/en/docs/claude-code)).
+```toml
+# lclaude last-used settings — edit freely or override with CLI / env.
+# Precedence: CLI flags > LCLAUDE_* env > this file > built-in defaults.
 
-3. Install at least one backend:
+model = "ornith:35b"
+backend = "auto"
+# port = 8080   # only written when you overrode the port
+```
 
-   - Ollama: `brew install ollama` then `ollama pull ornith:35b`
-   - llama.cpp: `brew install llama.cpp` (required for `llamacpp` and `hybrid`)
+**Precedence:** CLI flags → `LCLAUDE_MODEL` / `LCLAUDE_BACKEND` / `LCLAUDE_PORT` → config → built-in defaults.
 
-4. Optional alias in `~/.zshrc` / `~/.bashrc`:
+When you run with `backend = "auto"`, that preference is what gets saved — not the resolved engine — so magic stays
+sticky. Edit the file anytime, or override for one shot:
 
-   ```bash
-   alias lclaude='/full/path/to/lclaude.py'
-   ```
+```bash
+lclaude --backend ollama
+LCLAUDE_MODEL=ornith:35b lclaude
+```
 
 ## Usage
 
 ```bash
-lclaude                                    # auto-detect backend
+lclaude                                    # auto + last-used / default model
 lclaude --model ornith:35b
 lclaude --backend ollama
-lclaude --backend hybrid --model ornith:35b
+lclaude --backend managed --model ornith:35b
 lclaude --backend llamacpp --port 8080
-lclaude --list                             # ollama / hybrid: list Ollama models
+lclaude --list                             # list Ollama models
 lclaude --help
 lclaude -p "explain this file"             # args after lclaude flags go to claude
 ```
 
 ### Options
 
-| Option | Description | Default |
-| ------ | ----------- | ------- |
-| `--backend` | `ollama`, `llamacpp`, `hybrid`, or `auto` | `auto` |
-| `--port` | Override listen port | 11434 / 8080 / 9090 |
-| `--model` | Model name (must exist in Ollama for `ollama`/`hybrid`; cosmetic for `llamacpp`) | `ornith:35b` |
-| `--list` | List Ollama models (`ollama` / `hybrid` only) | — |
-| `-h`, `--help` | Show help | — |
+| Option         | Description                                                                       | Default             |
+| -------------- | --------------------------------------------------------------------------------- | ------------------- |
+| `--backend`    | `auto`, `ollama`, `llamacpp`, or `managed`                                        | `auto`              |
+| `--port`       | Override listen port                                                              | 11434 / 8080 / 9090 |
+| `--model`      | Model name (must exist in Ollama for `ollama`/`managed`; cosmetic for `llamacpp`) | `ornith:35b`        |
+| `--list`       | List Ollama models (`ollama` / `managed` / `auto`)                                | —                   |
+| `-h`, `--help` | Show help                                                                         | —                   |
 
-## Backend comparison
+## Backends reference
 
-| Feature | Ollama | llama.cpp | hybrid |
-| ------- | ------ | --------- | ------ |
-| Model management | `ollama pull` | Manual GGUF / `-hf` | Via Ollama |
-| Auto-start server | Yes (`ollama serve`) | No | Yes (`llama-server` from blob) |
-| Model validation | Yes | No | Yes |
-| Template auto-fix | N/A | Manual | Yes (Ornith / Qwen 3.x) |
-| Default port | 11434 | 8080 | 9090 |
-| Needs | Ollama | llama.cpp | Both |
+The `managed` CLI/config value means Ollama supplies the model while lclaude starts and owns the llama.cpp inference
+server. Benchmark output calls this **Managed llama.cpp**; the main lclaude status header labels its inference engine
+`llama.cpp`.
 
-**Prefer Ollama** for simplest day-to-day use.
-**Prefer hybrid** when you want Ollama’s registry but llama.cpp inference (and automatic template fixes).
-**Prefer llamacpp** when you already run `llama-server` with custom flags / quants.
+| Feature           | Ollama               | llama.cpp (`llamacpp`) | Managed llama.cpp (`managed`)  |
+| ----------------- | -------------------- | ---------------------- | ------------------------------ |
+| Model management  | `ollama pull`        | Manual GGUF / `-hf`    | Via Ollama                     |
+| Auto-start server | Yes (`ollama serve`) | No                     | Yes (`llama-server` from blob) |
+| Model validation  | Yes                  | No                     | Yes                            |
+| Template auto-fix | N/A                  | Manual                 | Yes (Ornith / Qwen 3.x)        |
+| Default port      | 11434                | 8080                   | 9090                           |
+| Needs             | Ollama               | Running `llama-server` | Ollama + `llama-server` binary |
 
-## Startup sequence
+**Prefer `auto`** for day-to-day use. **Force `ollama`** for the simplest path or when a blob won’t load in llama.cpp.
+**Force `managed`** to always spawn llama-server from an Ollama blob. **Force `llamacpp`** when you already run
+`llama-server` with custom flags / quants.
 
-1. Resolve backend (`auto` probes `:11434/api/version` then `:8080/health`).
-2. Pre-flight:
-   - **Ollama** — binary + health; auto-start `ollama serve`; validate model via `ollama list`.
-   - **llamacpp** — `/health`; reject incompatible chat templates with fix instructions.
-   - **hybrid** — validate model in Ollama; print LCLAUDE banner; resolve blob via `ollama show --modelfile`;
-     download patched template if needed; start `llama-server` (log file); fail fast with a short colored error if
-     load fails; stop server on exit.
-3. Backup `~/.claude/settings.json`, set `CLAUDE_CODE_ATTRIBUTION_HEADER=0`.
-4. Run `claude --model <model> …` with:
-   - `ANTHROPIC_BASE_URL=http://localhost:<port>`
-   - `ANTHROPIC_AUTH_TOKEN=lclaude`
-   - `ANTHROPIC_API_KEY` removed (so traffic does not hit the cloud)
-   - `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` (keeps the banner in scrollback)
-5. Restore settings (and stop owned llama-server) on exit / `SIGTERM` / `SIGHUP`.
-
-## Hybrid mode
-
-```bash
-ollama pull ornith:35b
-lclaude --backend hybrid --model ornith:35b
-```
-
-### Under the hood
+### Managed llama.cpp mode (under the hood)
 
 1. Ensure Ollama is up; confirm the model is installed
 2. Resolve GGUF path: `ollama show <model> --modelfile` → `FROM …/blobs/sha256-…`
@@ -204,9 +150,10 @@ lclaude --backend hybrid --model ornith:35b
 ### Cache layout
 
 ```text
+~/.config/lclaude/config.toml     # last-used prefs
 ~/.cache/lclaude/
-  qwen3.6-claude.jinja    # Claude-compatible chat template (optional download)
-  llama-server.log        # hybrid llama-server log (current session)
+  qwen3.6-claude.jinja            # Claude-compatible chat template (optional download)
+  llama-server.log                # managed llama-server log (current session)
 ```
 
 ### Compatibility
@@ -214,10 +161,10 @@ lclaude --backend hybrid --model ornith:35b
 - Not every Ollama blob loads in every llama.cpp build. Example: some `qwen3.5` blobs fail with
   `qwen35.rope.dimension_sections` metadata mismatches. Fall back to `--backend ollama`, or use an upstream HuggingFace
   GGUF with `--backend llamacpp`.
-- Do not `ollama rm <model>` while hybrid is using that blob.
-- Port **9090** avoids colliding with a user-managed server on **8080**.
+- Do not `ollama rm <model>` while managed mode is using that blob.
+- Port **9090** for managed avoids colliding with a user-managed server on **8080**.
 
-## llama.cpp setup (manual)
+## Manual llama.cpp setup
 
 ```bash
 brew install llama.cpp
@@ -231,9 +178,11 @@ llama-server -hf deepreinforce-ai/Ornith-1.0-35B-GGUF \
   --chat-template-file ~/.cache/lclaude/qwen3.6-claude.jinja --port 8080
 ```
 
+Then: `lclaude --backend llamacpp` (or bare `lclaude` if that server is healthy — auto prefers it).
+
 Useful flags: `-ngl 99` (GPU), `-c 262144` (context), `-np 4` (parallel), `--api-key …`, `--port …`.
 
-Reuse an Ollama blob without hybrid:
+Reuse an Ollama blob without managed mode:
 
 ```bash
 ollama show ornith:35b --modelfile | grep '^FROM'
@@ -244,20 +193,94 @@ Notes for `--backend llamacpp`:
 
 - `--model` is display-only (server already has one model loaded)
 - No auto-start; no `--list`
-- If the live template rejects late system messages, lclaude refuses to start and tells you how to fix it (or use hybrid)
+- If the live template rejects late system messages, lclaude refuses to start and tells you how to fix it (or use
+  managed / auto)
+
+## Benchmark Ollama and llama.cpp
+
+`lclaude-bench.py` compares the raw streaming `POST /v1/messages` inference path used by lclaude. It does not launch
+Claude Code, patch `~/.claude/settings.json`, or write `~/.config/lclaude/config.toml`.
+
+```bash
+python3 lclaude-bench.py
+python3 lclaude-bench.py --quick
+python3 lclaude-bench.py --model ornith:35b --warmup 1 --repeats 5
+python3 lclaude-bench.py --backends ollama,managed --unload-between --cooldown 10
+python3 lclaude-bench.py --backends llamacpp --llamacpp-port 8080
+python3 lclaude-bench.py --dry-run
+python3 lclaude-bench.py --json > benchmark.json
+python3 lclaude-bench.py --verbose
+python3 lclaude-bench.py --quiet --json > benchmark.json
+```
+
+Useful controls:
+
+- `--backends ollama,managed,llamacpp` selects targets; `--port` overrides every selected target, while `--ollama-port`,
+  `--managed-port`, and `--llamacpp-port` override them individually.
+- `--timeout SECONDS` sets the per-request socket timeout (default: 600).
+- `--keep-managed` leaves the benchmark-owned Managed llama.cpp server running after its suite; `--no-color` disables
+  ANSI styling.
+- `--quiet` suppresses the benchmark header and all progress; `-v` / `--verbose` expands progress to setup, warmup, and
+  individual requests.
+
+It reads the same model, backend, and port preferences with the same precedence as lclaude: CLI → `LCLAUDE_*` env →
+config → defaults. An `auto` preference (the normal default) compares Ollama and Managed llama.cpp sequentially. A
+pinned backend runs only that target unless `--backends` overrides it. `llamacpp` is also available as a target when you
+have a user-managed llama-server.
+
+By default, each backend runs a reproducible staged workload: a short latency request, then two increasingly detailed
+requests to generate a Makefile for `lclaude.py` and `lclaude-bench.py`. The Makefile prompts use fixed project
+requirements (stdlib-only scripts, syntax checks, dry-run/benchmark targets, POSIX make/shell) rather than local source
+files, so results remain comparable across machines and revisions. The stages cap generation at 256, 768, and 1536
+tokens respectively. `--quick` runs only the short 256-token workload.
+
+Use `--prompt` or `--prompt-file` to replace the suite with one custom workload; `--max-tokens` applies only to that
+explicit prompt. `--quick` cannot be combined with `--prompt`, `--prompt-file`, or `--max-tokens`. A full default
+invocation makes `(warmup + repeats) × 3` requests to each backend, so start with `--quick` or `--warmup 0 --repeats 1`
+when checking setup.
+
+Use `--dry-run` to inspect the resolved model, targets, and ports without contacting a backend, loading a model, or
+starting Managed llama.cpp.
+
+The run starts with an `LCLAUDE-BENCH` parameter box and finishes with a boxed `BENCHMARK RESULTS` panel. The panel
+groups tables by workload and reports steady-state, post-warmup median time-to-first-text token (TTFT), total response
+time, decode tokens/sec, output tokens, and successful runs. When a workload has valid Ollama and Managed llama.cpp
+metrics, its `Comparison` row states their total-latency and decode-throughput percentage deltas.
+
+Result JSON is grouped as `workloads[]`, each containing `backends[]` and an Ollama-vs-Managed `comparison` object when
+both metrics are available. It additionally includes individual runs, prompt hashes and sizes, per-workload generation
+caps, min/median/max summaries, versions, ports, errors, and the Managed llama.cpp GGUF blob path. Dry-run JSON instead
+uses a flat top-level `backends` list plus the resolved workloads.
+
+Setup time stays in JSON only as diagnostic metadata: Ollama is a persistent daemon, while Managed llama.cpp is launched
+and owned by the benchmark, so their setup times are not a fair engine comparison. Its `startup_s` value is repeated on
+each workload/backend result. Both backends finish setup, then run discarded warmups per workload before that workload's
+displayed request measurements. The normal benchmark intentionally does not stop Ollama.
+
+While it runs, the default view keeps one spinner on each backend and prints compact `Running benchmarks`,
+`Running
+Ollama benchmarks`, and `Running Managed llama.cpp benchmarks` milestones. Pass `-v` / `--verbose` to include
+server setup, warmups, and individual-run progress. Progress goes to stderr so JSON on stdout stays machine-readable;
+with `--json`, the `LCLAUDE-BENCH` header also goes to stderr. Without `--json`, that header and human results go to
+stdout.
+
+This is a useful runtime comparison, not a perfect hardware-neutral benchmark: Ollama and llama.cpp use different
+schedulers and cache policies; model load, GPU thermals, and the OS file cache affect results. Use a fixed prompt,
+warmups, sequential runs, and optionally `--unload-between` to make a comparison more meaningful.
 
 ## Troubleshooting
 
-| Issue | What to try |
-| ----- | ----------- |
-| `no local LLM backend detected` | Start Ollama or llama-server, or pass `--backend` |
-| `ollama not found` / not running | Install Ollama; `ollama serve` or let lclaude start it |
-| `model '…' not found in ollama` | `ollama pull <model>` or `lclaude --list` |
-| `llama-server not reachable` | Start server on the expected port |
-| Incompatible chat template | Use `--chat-template-file`, or `--backend hybrid` |
-| Hybrid: could not load model | See Cause in the error; check log; try `--backend ollama` |
-| Hybrid: template download failed | `curl` the URL into `~/.cache/lclaude/qwen3.6-claude.jinja` (SSL proxies like Zscaler can break Python urllib) |
-| `claude` not found | Install Claude Code on `PATH` |
+| Issue                             | What to try                                                                                                    |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `no local LLM backend available`  | Install/start Ollama or llama-server, or pass `--backend`                                                      |
+| `ollama not found` / not running  | Install Ollama; `ollama serve` or let lclaude start it                                                         |
+| `model '…' not found in ollama`   | `ollama pull <model>` or `lclaude --list`                                                                      |
+| `llama-server not reachable`      | Start server on the expected port                                                                              |
+| Incompatible chat template        | Use `--chat-template-file`, or `--backend managed` / `auto`                                                    |
+| Managed: could not load model     | See Cause in the error; check log; try `--backend ollama`                                                      |
+| Managed: template download failed | `curl` the URL into `~/.cache/lclaude/qwen3.6-claude.jinja` (SSL proxies like Zscaler can break Python urllib) |
+| Bad / ignored config              | Fix or delete `~/.config/lclaude/config.toml`                                                                  |
+| `claude` not found                | Install Claude Code on `PATH`                                                                                  |
 
 > [!TIP]
 > First load into memory can be slow; later sessions are faster.

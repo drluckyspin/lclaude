@@ -9,7 +9,7 @@
 #   Supports three backends:
 #     - Ollama — managed model registry with auto-start
 #     - llama.cpp (llama-server) — direct GGUF inference, maximum control
-#     - hybrid — Ollama for model management, llama-server for inference
+#     - managed — Ollama for model management, llama-server for inference
 #   It also temporarily patches ``~/.claude/settings.json`` to suppress
 #   the attribution header while running.
 #
@@ -41,7 +41,7 @@
 #       Then reload: ``source ~/.zshrc`` (or restart your terminal).
 #
 # Usage
-#   Basic (auto-detects backend, uses default model ornith:35b):
+#   Basic (auto picks the best backend; remembers last-used prefs):
 #       lclaude
 #
 #   Choose a specific model:
@@ -51,8 +51,8 @@
 #   Explicitly choose a backend:
 #       lclaude --backend ollama
 #       lclaude --backend llamacpp
-#       lclaude --backend hybrid        # Ollama models + llama-server
-#       lclaude --backend auto          (default — probes both)
+#       lclaude --backend managed       # Ollama models + owned llama-server
+#       lclaude --backend auto          (default — smart resolve)
 #
 #   Custom port:
 #       lclaude --backend llamacpp --port 9090
@@ -63,31 +63,35 @@
 #   Pass arguments through to ``claude``:
 #       lclaude --system "You are a helpful assistant" --message "Hello"
 #
-#   Show help (prints this script's docstring + --model info):
+#   Show help:
 #       lclaude --help
 #
 # How it works
-#   1.  Detects or selects the backend (Ollama on :11434, llama.cpp on :8080,
-#       hybrid on :9090).
-#   2.  For Ollama: verifies installed & running (auto-starts if needed),
+#   1.  Loads ~/.config/lclaude/config.toml (if present). Precedence:
+#       CLI > LCLAUDE_* env > config > built-in defaults.
+#   2.  With --backend auto (default): prefer a warm llama-server; else for
+#       Ornith/Qwen-style models with llama-server on PATH, use managed
+#       (Ollama blob + patched template on :9090); else Ollama on :11434.
+#   3.  For Ollama: verifies installed & running (auto-starts if needed),
 #       validates the model is pulled.
-#   3.  For llama.cpp: verifies the server is reachable (no auto-start,
+#   4.  For llama.cpp: verifies the server is reachable (no auto-start,
 #       no model validation — the server already has a model loaded).
-#   4.  For hybrid: resolves the Ollama GGUF blob, auto-starts llama-server
+#   5.  For managed: resolves the Ollama GGUF blob, auto-starts llama-server
 #       (with a patched chat template when needed), then routes Claude to it.
-#   5.  Backs up ``~/.claude/settings.json`` to ``settings.json.off``,
+#   6.  Saves last-used requested prefs to config.toml.
+#   7.  Backs up ``~/.claude/settings.json`` to ``settings.json.off``,
 #       then sets ``CLAUDE_CODE_ATTRIBUTION_HEADER=0`` in the settings file.
-#   6.  Sets ``ANTHROPIC_AUTH_TOKEN`` and ``ANTHROPIC_BASE_URL`` in the
+#   8.  Sets ``ANTHROPIC_AUTH_TOKEN`` and ``ANTHROPIC_BASE_URL`` in the
 #       environment, disables Claude's alternate-screen (fullscreen) TUI so
 #       the header stays visible, then runs ``claude --model <model>`` with
 #       the remaining args.
-#   7.  On exit (normal, signal, or interrupt) the original settings file is
+#   9.  On exit (normal, signal, or interrupt) the original settings file is
 #       restored, any owned llama-server is stopped, and the backup is deleted.
 #
 # Environment overrides
-#   No env vars need to be set beforehand — this script manages everything
-#   internally.  If ``ANTHROPIC_API_KEY`` is present in the parent env it
-#   is deliberately stripped so traffic goes to the local server, not the cloud.
+#   LCLAUDE_MODEL, LCLAUDE_BACKEND, LCLAUDE_PORT override config (CLI still wins).
+#   If ``ANTHROPIC_API_KEY`` is present in the parent env it is deliberately
+#   stripped so traffic goes to the local server, not the cloud.
 #
 # Copyright (c) 2026 Todd Papaioannou
 # License: MIT
@@ -106,6 +110,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -120,13 +125,18 @@ SETTINGS_OFF = SETTINGS.with_name(SETTINGS.name + ".off")
 # Supported backends and their default ports
 BACKEND_OLLAMA = "ollama"
 BACKEND_LLAMACPP = "llamacpp"
-BACKEND_HYBRID = "hybrid"
+BACKEND_MANAGED = "managed"
 BACKEND_AUTO = "auto"
 DEFAULT_PORTS = {
     BACKEND_OLLAMA: 11434,
     BACKEND_LLAMACPP: 8080,
-    BACKEND_HYBRID: 9090,
+    BACKEND_MANAGED: 9090,
 }
+DEFAULT_MODEL = "ornith:35b"
+
+# User prefs (last-used); cache stays under ~/.cache/lclaude/
+CONFIG_DIR = Path.home() / ".config" / "lclaude"
+CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 # Seconds to wait for ``ollama serve`` to accept connections after launch
 OLLAMA_STARTUP_TIMEOUT = 30
@@ -134,7 +144,7 @@ OLLAMA_STARTUP_TIMEOUT = 30
 # Seconds to wait for ``ollama list`` / ``ollama show`` to complete
 OLLAMA_LIST_TIMEOUT = 15
 
-# Seconds to wait for hybrid-mode ``llama-server`` to become healthy
+# Seconds to wait for managed-mode ``llama-server`` to become healthy
 LLAMACPP_STARTUP_TIMEOUT = 120
 
 # Patched chat template for Ornith/Qwen 3.6 models (Claude Code-compatible)
@@ -144,7 +154,7 @@ QWEN36_TEMPLATE_URL = (
     "raw/main/chat_template.jinja"
 )
 QWEN36_TEMPLATE_FILE = TEMPLATE_CACHE_DIR / "qwen3.6-claude.jinja"
-# Hybrid-mode llama-server stdout/stderr (truncated each launch)
+# Managed-mode llama-server stdout/stderr (truncated each launch)
 LLAMACPP_LOG_FILE = TEMPLATE_CACHE_DIR / "llama-server.log"
 
 # Models known to embed templates that reject late system messages
@@ -286,12 +296,12 @@ def run_claude(
     copy/paste keep working. Session context is kept in the terminal tab title
     because Claude's redraw clears anything printed above it.
 
-    If *server_proc* is provided (hybrid mode), it is terminated on exit.
+    If *server_proc* is provided (managed mode), it is terminated on exit.
     """
     ensure_settings_file()
     backup_settings()
 
-    if backend in (BACKEND_HYBRID, BACKEND_LLAMACPP):
+    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
         backend_label = "llama.cpp"
     else:
         backend_label = "Ollama"
@@ -480,8 +490,8 @@ def check_llamacpp(port: int) -> tuple[bool, str | None]:
                 f"  llama-server -m model.gguf --chat-template-file {cache} "
                 f"--port {port}\n"
                 "\n"
-                "Or use hybrid mode (auto-fixes this):\n"
-                "  lclaude --backend hybrid --model <model>",
+                "Or use managed mode (auto-fixes this):\n"
+                "  lclaude --backend managed --model <model>",
             )
         global _BACKEND_VERSION
         _BACKEND_VERSION = ver
@@ -497,7 +507,7 @@ def check_llamacpp(port: int) -> tuple[bool, str | None]:
         f"llama-server not reachable on port {port}.\n"
         f"Start it first: llama-server -m model.gguf --port {port}\n"
         f"Or install: brew install llama.cpp\n"
-        f"Or use hybrid mode: lclaude --backend hybrid",
+        f"Or use managed mode: lclaude --backend managed",
     )
 
 
@@ -595,7 +605,7 @@ def _get_llamacpp_props(port: int) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Hybrid backend (Ollama models + llama-server inference)
+# Managed backend (Ollama models + llama-server inference)
 # ---------------------------------------------------------------------------
 
 
@@ -781,7 +791,7 @@ def start_llamacpp_server(
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # Truncate so each hybrid session starts a fresh log for easy tail -f.
+        # Truncate so each managed session starts a fresh log for easy tail -f.
         log_fh = open(log_file, "w", encoding="utf-8")
     except OSError as exc:
         print(
@@ -844,7 +854,7 @@ def wait_for_llamacpp(
 
 
 def _parse_llamacpp_load_error() -> str | None:
-    """Extract a concise cause from the hybrid llama-server log, if present."""
+    """Extract a concise cause from the managed llama-server log, if present."""
     try:
         if not LLAMACPP_LOG_FILE.is_file():
             return None
@@ -884,15 +894,15 @@ def _parse_llamacpp_load_error() -> str | None:
     return None
 
 
-def _hybrid_startup_failure_message(
+def _managed_startup_failure_message(
     model: str,
     *,
     exited: bool,
 ) -> str:
-    """Build a short, user-facing error for hybrid llama-server startup failure."""
+    """Build a short, user-facing error for managed llama-server startup failure."""
     cause = _parse_llamacpp_load_error()
     if exited:
-        headline = f"could not load model '{model}' via llama-server (hybrid mode)."
+        headline = f"could not load model '{model}' via llama-server (managed mode)."
     else:
         headline = (
             f"llama-server did not become ready within "
@@ -942,7 +952,7 @@ def _stop_process(proc: subprocess.Popen[Any] | None) -> None:
             pass
 
 
-def prepare_hybrid_backend(
+def prepare_managed_backend(
     model: str, port: int
 ) -> subprocess.Popen[Any]:
     """Resolve the Ollama blob, start llama-server, and wait until healthy.
@@ -961,7 +971,7 @@ def prepare_hybrid_backend(
         exited = server_proc.poll() is not None
         _stop_process(server_proc)
         print(
-            _hybrid_startup_failure_message(model, exited=exited),
+            _managed_startup_failure_message(model, exited=exited),
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -976,7 +986,7 @@ def prepare_hybrid_backend(
             if not wait_for_llamacpp(port, proc=server_proc):
                 _stop_process(server_proc)
                 print(
-                    _hybrid_startup_failure_message(
+                    _managed_startup_failure_message(
                         model, exited=server_proc.poll() is not None
                     ),
                     file=sys.stderr,
@@ -997,23 +1007,141 @@ def prepare_hybrid_backend(
 
 
 # ---------------------------------------------------------------------------
-# Auto-detection
+# Config (~/.config/lclaude/config.toml)
 # ---------------------------------------------------------------------------
 
 
-def detect_backend(ollama_port: int, llamacpp_port: int) -> str | None:
-    """Probe both backends and return whichever is reachable first.
+def load_config() -> dict[str, Any]:
+    """Load user prefs from ``CONFIG_FILE``.
 
-    Returns BACKEND_OLLAMA, BACKEND_LLAMACPP, or None if neither responds.
-    Ollama is checked first (it is the more common/default setup).
+    Returns an empty dict if missing. On parse errors, warns and returns {}.
     """
-    ok_ollama, _ = _is_ollama_reachable(ollama_port)
+    if not CONFIG_FILE.is_file():
+        return {}
+    try:
+        raw = CONFIG_FILE.read_bytes()
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        print(
+            f"Warning: ignoring invalid config {CONFIG_FILE}: {exc}",
+            file=sys.stderr,
+        )
+        return {}
+    if not isinstance(data, dict):
+        print(
+            f"Warning: ignoring invalid config {CONFIG_FILE}: expected a table",
+            file=sys.stderr,
+        )
+        return {}
+    return data
+
+
+def save_config(*, model: str, backend: str, port: int | None) -> None:
+    """Persist last-used requested prefs (not the resolved auto backend)."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "# lclaude last-used settings — edit freely or override with CLI / env.",
+            "# Precedence: CLI flags > LCLAUDE_* env > this file > built-in defaults.",
+            "#",
+            f'# Config path: {CONFIG_FILE}',
+            "",
+            f'model = "{_toml_escape(model)}"',
+            f'backend = "{_toml_escape(backend)}"',
+        ]
+        if port is not None:
+            lines.append(f"port = {int(port)}")
+        lines.append("")
+        CONFIG_FILE.write_text("\n".join(lines), encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"Warning: could not write config {CONFIG_FILE}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"Warning: ignoring invalid {name}={raw!r} (expected integer)",
+            file=sys.stderr,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Auto-detection / smart resolve
+# ---------------------------------------------------------------------------
+
+
+def _ollama_has_model(model: str) -> bool:
+    """Return True if *model* appears in ``ollama list`` (exact or base name)."""
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=OLLAMA_LIST_TIMEOUT,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+
+    installed: list[str] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0].rsplit(":", 1)[0]
+        if name.lower() == "name":
+            continue
+        if name not in installed:
+            installed.append(name)
+
+    full_output = result.stdout.strip()
+    if model in set(installed) or f"{model}:" in full_output:
+        return True
+    model_base = model.rsplit(":", 1)[0]
+    return model_base in installed
+
+
+def resolve_backend(
+    model: str,
+    *,
+    ollama_port: int,
+    llamacpp_port: int,
+) -> str | None:
+    """Pick the best backend for *model* given what is available locally.
+
+    Priority:
+      1. Healthy (or still-loading) user ``llama-server`` on *llamacpp_port*
+      2. Managed llama-server when the model needs a Claude template patch,
+         ``llama-server`` is on PATH, and Ollama has the model
+      3. Ollama (auto-start if installed)
+      4. None
+    """
+    ok_cpp, ver_cpp = _is_llamacpp_reachable(llamacpp_port)
+    if ok_cpp or ver_cpp == "loading":
+        return BACKEND_LLAMACPP
+
+    if _model_needs_template_patch(model) and shutil.which("llama-server"):
+        ok_ollama, _ = check_ollama(ollama_port, auto_start=True)
+        if ok_ollama and _ollama_has_model(model):
+            return BACKEND_MANAGED
+
+    ok_ollama, _ = check_ollama(ollama_port, auto_start=True)
     if ok_ollama:
         return BACKEND_OLLAMA
-
-    ok_cpp, _ = _is_llamacpp_reachable(llamacpp_port)
-    if ok_cpp:
-        return BACKEND_LLAMACPP
 
     return None
 
@@ -1143,8 +1271,8 @@ def _print_header(
         dim = reset = border = value = ""
 
     title = "LCLAUDE"
-    # Hybrid runs inference via llama-server; show that engine (and its build) in the UI.
-    if backend in (BACKEND_HYBRID, BACKEND_LLAMACPP):
+    # Managed mode runs inference via llama-server; show that engine (and its build) in the UI.
+    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
         backend_label = "llama.cpp"
     else:
         backend_label = "Ollama"
@@ -1176,14 +1304,31 @@ def _print_header(
 def main(argv: list[str]) -> int:
     setup_logging()
 
-    # Parse only our flags; pass the rest through verbatim to claude
+    cfg = load_config()
+    cfg_model = cfg.get("model") if isinstance(cfg.get("model"), str) else None
+    cfg_backend = cfg.get("backend") if isinstance(cfg.get("backend"), str) else None
+    cfg_port = cfg.get("port") if isinstance(cfg.get("port"), int) else None
+    if cfg_backend is not None and cfg_backend not in (
+        BACKEND_OLLAMA,
+        BACKEND_LLAMACPP,
+        BACKEND_MANAGED,
+        BACKEND_AUTO,
+    ):
+        print(
+            f"Warning: ignoring invalid backend in config: {cfg_backend!r}",
+            file=sys.stderr,
+        )
+        cfg_backend = None
+
+    # Parse only our flags; pass the rest through verbatim to claude.
+    # Defaults are None so we can apply CLI > env > config > built-in.
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--model", default="ornith:35b")
+    parser.add_argument("--model", default=None)
     parser.add_argument(
         "--backend",
-        choices=[BACKEND_OLLAMA, BACKEND_LLAMACPP, BACKEND_HYBRID, BACKEND_AUTO],
-        default=BACKEND_AUTO,
-        help="LLM backend: ollama, llamacpp, hybrid, or auto (default: auto).",
+        choices=[BACKEND_OLLAMA, BACKEND_LLAMACPP, BACKEND_MANAGED, BACKEND_AUTO],
+        default=None,
+        help="LLM backend: ollama, llamacpp, managed, or auto (default: auto).",
     )
     parser.add_argument(
         "--port",
@@ -1191,7 +1336,7 @@ def main(argv: list[str]) -> int:
         default=None,
         help=(
             "Override the backend port "
-            "(default: 11434 Ollama / 8080 llama.cpp / 9090 hybrid)."
+            "(default: 11434 Ollama / 8080 llama.cpp / 9090 managed)."
         ),
     )
     parser.add_argument(
@@ -1200,7 +1345,33 @@ def main(argv: list[str]) -> int:
         help="List models available in Ollama and exit.",
     )
     args, claude_argv = parser.parse_known_args(argv)
-    model = args.model
+
+    env_model = os.environ.get("LCLAUDE_MODEL") or None
+    env_backend = os.environ.get("LCLAUDE_BACKEND") or None
+    if env_backend is not None and env_backend not in (
+        BACKEND_OLLAMA,
+        BACKEND_LLAMACPP,
+        BACKEND_MANAGED,
+        BACKEND_AUTO,
+    ):
+        print(
+            f"Warning: ignoring invalid LCLAUDE_BACKEND={env_backend!r}",
+            file=sys.stderr,
+        )
+        env_backend = None
+    env_port = _env_int("LCLAUDE_PORT")
+
+    # Precedence: CLI > env > config > built-in
+    model = args.model or env_model or cfg_model or DEFAULT_MODEL
+    requested_backend = (
+        args.backend or env_backend or cfg_backend or BACKEND_AUTO
+    )
+    if args.port is not None:
+        explicit_port: int | None = args.port
+    elif env_port is not None:
+        explicit_port = env_port
+    else:
+        explicit_port = cfg_port
 
     is_help = any(arg in ("-h", "--help") for arg in argv)
 
@@ -1211,69 +1382,75 @@ def main(argv: list[str]) -> int:
         help_text = (
             f"{heading}Usage:{reset} lclaude [OPTIONS] [ARGS passed to claude]\n"
             "\n"
-            "Run Claude Code against a local LLM (Ollama, llama.cpp, or hybrid)\n"
+            "Run Claude Code against a local LLM (Ollama, llama.cpp, or managed)\n"
             "\n"
             f"{heading}Options:{reset}\n"
             "  -h, --help           Show this help message and exit\n"
-            "  --backend BACKEND    ollama, llamacpp, hybrid, or auto (default: auto)\n"
+            "  --backend BACKEND    ollama, llamacpp, managed, or auto (default: auto)\n"
             "  --port PORT          Override backend port (default: 11434/8080/9090)\n"
             "  --list               List models available in Ollama and exit\n"
-            "  --model MODEL        Model to use (default: ornith:35b)\n"
-            "                       Ollama/hybrid: must be pulled. llama.cpp: label.\n"
+            "  --model MODEL        Model to use (default: ornith:35b or last-used)\n"
+            "                       Ollama/managed: must be pulled. llama.cpp: label.\n"
             "\n"
-            f"{heading}Examples (Ollama):{reset}\n"
-            "  lclaude                          # auto-detect, default model\n"
-            "  lclaude --model ornith           # use the model's base name\n"
-            "  lclaude --model ornith:35b       # with a specific tag\n"
+            f"{heading}Config:{reset}\n"
+            f"  {CONFIG_FILE}\n"
+            "  Auto-saved after a successful start. CLI > LCLAUDE_* env > config.\n"
+            "\n"
+            f"{heading}Examples:{reset}\n"
+            "  lclaude                          # auto: do the right thing\n"
+            "  lclaude --model ornith:35b       # remember model in config\n"
             "  lclaude --list                   # list available Ollama models\n"
-            "\n"
-            f"{heading}Examples (hybrid — Ollama models + llama-server):{reset}\n"
-            "  lclaude --backend hybrid         # auto-start llama-server from Ollama blob\n"
-            "  lclaude --backend hybrid --model ornith:35b\n"
-            f"  tail -f {LLAMACPP_LOG_FILE}   # watch hybrid llama-server logs\n"
-            "\n"
-            f"{heading}Examples (llama.cpp):{reset}\n"
-            "  lclaude --backend llamacpp       # use llama-server on :8080\n"
-            "  lclaude --backend llamacpp --port 9090  # custom port\n"
-            "  lclaude --backend llamacpp --model my-model  # cosmetic name\n"
+            "  lclaude --backend ollama         # force Ollama inference\n"
+            "  lclaude --backend managed        # Ollama blob + owned llama-server\n"
+            "  lclaude --backend llamacpp       # use existing llama-server on :8080\n"
+            f"  tail -f {LLAMACPP_LOG_FILE}\n"
             "\n"
             f"{heading}Prerequisites:{reset}\n"
             "  brew install claude-code         # install Claude Code CLI\n"
             "  brew install ollama              # install Ollama\n"
-            "  ollama pull ornith:35b           # pull a model for Ollama/hybrid\n"
-            "  brew install llama.cpp           # install llama.cpp (llamacpp/hybrid)\n"
-            "  llama-server -m model.gguf       # start llama-server with a GGUF\n"
+            "  ollama pull ornith:35b           # pull a model\n"
+            "  brew install llama.cpp           # optional (managed / llamacpp)\n"
         )
         print(help_text, file=sys.stdout)
         return 0
 
     # --- Backend resolution ---
-    backend = args.backend
+    backend = requested_backend
+    # Auto discovery always probes each backend's normal port. An explicit
+    # --port selects where the chosen backend will be used afterwards; it
+    # must not make us probe Ollama and llama-server on the same port.
+    ollama_port = DEFAULT_PORTS[BACKEND_OLLAMA]
+    llamacpp_port = DEFAULT_PORTS[BACKEND_LLAMACPP]
 
-    if backend == BACKEND_AUTO:
-        ollama_port = args.port or DEFAULT_PORTS[BACKEND_OLLAMA]
-        llamacpp_port = args.port or DEFAULT_PORTS[BACKEND_LLAMACPP]
-        detected = detect_backend(ollama_port, llamacpp_port)
+    # --list always needs Ollama; do not let auto pick a warm llama-server.
+    if args.list and backend == BACKEND_AUTO:
+        backend = BACKEND_OLLAMA
+        port = explicit_port or DEFAULT_PORTS[BACKEND_OLLAMA]
+    elif backend == BACKEND_AUTO:
+        detected = resolve_backend(
+            model,
+            ollama_port=ollama_port,
+            llamacpp_port=llamacpp_port,
+        )
         if detected is None:
             print(
-                "Error: no local LLM backend detected.\n"
-                f"  • Ollama not responding on port {ollama_port}\n"
-                f"  • llama-server not responding on port {llamacpp_port}\n"
+                "Error: no local LLM backend available.\n"
+                f"  • No healthy llama-server on port {llamacpp_port}\n"
+                f"  • Ollama not usable on port {ollama_port}\n"
                 "\n"
-                "Start one of:\n"
-                "  ollama serve                             # then: ollama pull ornith:35b\n"
-                "  llama-server -m model.gguf --port 8080  # llama.cpp direct\n"
-                "  lclaude --backend hybrid                 # Ollama models + llama-server\n"
+                "Try:\n"
+                "  brew install ollama && ollama pull ornith:35b\n"
+                "  brew install llama.cpp   # for managed Ornith/Qwen template fixes\n"
+                "  llama-server -m model.gguf --port 8080\n"
                 "\n"
-                "Or specify explicitly: lclaude --backend ollama | llamacpp | hybrid",
+                "Or specify: lclaude --backend ollama | llamacpp | managed",
                 file=sys.stderr,
             )
             return 1
         backend = detected
-        # If user gave --port with auto, use it; otherwise use the detected default
-        port = args.port or DEFAULT_PORTS[backend]
+        port = explicit_port or DEFAULT_PORTS[backend]
     else:
-        port = args.port or DEFAULT_PORTS[backend]
+        port = explicit_port or DEFAULT_PORTS[backend]
 
     # --- Pre-flight checks (backend-specific) ---
     installed_models: list[str] | None = None
@@ -1311,7 +1488,7 @@ def main(argv: list[str]) -> int:
             print(f"Error: {reason}", file=sys.stderr)
             return 1
 
-    elif backend == BACKEND_HYBRID:
+    elif backend == BACKEND_MANAGED:
         # --list only needs Ollama; do not start llama-server
         ok, reason = check_ollama(DEFAULT_PORTS[BACKEND_OLLAMA], auto_start=True)
         if not ok:
@@ -1334,11 +1511,18 @@ def main(argv: list[str]) -> int:
                 installed_models,
                 log_file=LLAMACPP_LOG_FILE,
             )
-        server_proc = prepare_hybrid_backend(model, port)
+        server_proc = prepare_managed_backend(model, port)
+
+    # Persist last-used *requested* prefs (keep backend=auto sticky when used).
+    save_config(
+        model=model,
+        backend=requested_backend,
+        port=explicit_port,
+    )
 
     # Show a startup banner only when connected to a real terminal.
     # Session context also lives in the terminal tab title while Claude runs.
-    # Hybrid already printed a preliminary banner before llama-server start;
+    # Managed already printed a preliminary banner before llama-server start;
     # reprint with the real llama.cpp build once the server is healthy.
     if show_header:
         _print_header(
@@ -1349,7 +1533,7 @@ def main(argv: list[str]) -> int:
             installed_models,
             log_file=(
                 LLAMACPP_LOG_FILE
-                if backend == BACKEND_HYBRID and server_proc is not None
+                if backend == BACKEND_MANAGED and server_proc is not None
                 else None
             ),
         )
