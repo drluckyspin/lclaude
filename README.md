@@ -6,7 +6,7 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against a **lo
 API.
 
 `lclaude` (local claude) is a single-file Python wrapper (**stdlib only**, **Python 3.11+**) that points the `claude`
-CLI at Ollama, llama.cpp, or both. No proxy process, no extra dependencies — just env vars and a thin pre-flight.
+CLI at Ollama, llama.cpp, or both. No proxy process, no extra dependencies.
 
 ## What is `claude`?
 
@@ -17,14 +17,11 @@ same API on localhost — so `claude` can drive a local model if you redirect `A
 
 ## Why this project?
 
-`claude` is excellent, but cloud-only by default. Local runners already speak the Anthropic API; what’s missing is the
-glue: pick a sensible backend, validate the model, fix chat-template footguns, set the right env vars, keep the UI
-banner visible, and remember your last prefs. `lclaude` also temporarily switches `claude`’s local settings for a
-local-model session, then restores them on exit, so moving between cloud and local models stays frictionless.
-
-`lclaude` is that glue in one script you can drop on `PATH`. Type `lclaude --model ornith` and it does the right thing.
-Teams that already use Ollama keep `ollama pull`. When llama.cpp is available and a model needs a Claude-friendly
-template (Ornith / Qwen 3.x), `lclaude` can manage that path for you — without a long command line every time.
+`claude` only talks to Anthropic's cloud by default. Ollama and llama.cpp already expose the same Messages API locally,
+but you still need to set env vars, validate models, work around chat-template incompatibilities (Ornith / Qwen 3.x),
+and restore `~/.claude/settings.json` afterwards. `lclaude` handles that: it detects available backends, patches
+settings for the session, spawns `claude`, and restores everything on exit. Your last model and backend are saved to
+`~/.config/lclaude/config.toml` so subsequent runs reuse them.
 
 ## Quick start
 
@@ -43,8 +40,8 @@ lclaude
 lclaude --model ornith:35b
 ```
 
-That’s it. After a successful start, prefs are saved under `~/.config/lclaude/config.toml` so the next bare `lclaude`
-reuses your last model (and still runs `auto` magic unless you pinned a backend).
+After a successful start, prefs are saved to `~/.config/lclaude/config.toml` so the next bare `lclaude` reuses
+your last model and backend.
 
 > [!NOTE]
 > Ornith’s embedded Qwen 3.6 template rejects system messages after the first turn — that breaks `claude` tool use with
@@ -93,8 +90,7 @@ backend = "auto"
 
 **Precedence:** CLI flags → `LCLAUDE_MODEL` / `LCLAUDE_BACKEND` / `LCLAUDE_PORT` → config → built-in defaults.
 
-When you run with `backend = "auto"`, that preference is what gets saved — not the resolved engine — so magic stays
-sticky. Edit the file anytime, or override for one shot:
+When you run with `backend = "auto"`, that preference is what gets saved (not the resolved engine). Edit the file or override for one run:
 
 ```bash
 lclaude --backend ollama
