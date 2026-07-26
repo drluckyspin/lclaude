@@ -160,6 +160,21 @@ LLAMACPP_LOG_FILE = TEMPLATE_CACHE_DIR / "llama-server.log"
 # Models known to embed templates that reject late system messages
 MODELS_NEEDING_TEMPLATE_PATCH = ("ornith", "qwen3")
 
+# Proxy/cloud integrations that must not affect a local Claude Code session.
+# ``ANTHROPIC_BASE_URL`` belongs only to the settings-file list: lclaude sets
+# its own localhost value in the child environment after stripping the rest.
+ROUTING_ENV_DENYLIST = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "PORTKEY_API_KEY",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+)
+SETTINGS_ROUTING_ENV_DENYLIST = (
+    "ANTHROPIC_BASE_URL",
+    *ROUTING_ENV_DENYLIST,
+)
+
 # ANSI accents for the status box, help headings, and failure messages
 HEADER_ACCENT = "\x1b[92m"  # bright green
 ERROR_ACCENT = "\x1b[91m"  # bright red
@@ -231,13 +246,23 @@ def restore_settings() -> None:
     SETTINGS_OFF.unlink(missing_ok=True)
 
 
+def _strip_routing_env(env: dict[str, Any], keys: tuple[str, ...]) -> None:
+    """Remove cloud/proxy routing variables from an environment mapping."""
+    for key in keys:
+        env.pop(key, None)
+
+
 def apply_attribution_patch() -> None:
     """Temporarily set ``CLAUDE_CODE_ATTRIBUTION_HEADER=0`` in the settings file
-    so Claude Code doesn't append its attribution banner to output."""
+    so Claude Code doesn't append its attribution banner to output.
+
+    Also clear cloud/proxy routing settings while the local session runs.
+    """
     data = load_settings(SETTINGS)
     env = data.get("env")
     if not isinstance(env, dict):
         env = {}
+    _strip_routing_env(env, SETTINGS_ROUTING_ENV_DENYLIST)
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
     data["env"] = env
     save_settings(SETTINGS, data)
@@ -246,10 +271,11 @@ def apply_attribution_patch() -> None:
 def build_child_env(_backend: str, port: int) -> dict[str, str]:
     """Build the environment for the claude subprocess.
 
-    Start from the parent env, inject backend routing vars, and strip
-    ``ANTHROPIC_API_KEY`` so requests don't accidentally hit the cloud.
+    Start from the parent env, remove cloud/proxy routing variables, then
+    inject lclaude's localhost routing vars.
     """
     env = os.environ.copy()
+    _strip_routing_env(env, ROUTING_ENV_DENYLIST)
     env.update({
         "ANTHROPIC_AUTH_TOKEN": "lclaude",
         "ANTHROPIC_BASE_URL": f"http://localhost:{port}",
@@ -260,7 +286,6 @@ def build_child_env(_backend: str, port: int) -> dict[str, str]:
         # selection / copy-paste / Cmd-F keep working.
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
     })
-    env.pop("ANTHROPIC_API_KEY", None)
     return env
 
 

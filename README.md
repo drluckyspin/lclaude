@@ -70,8 +70,9 @@ With `--backend auto` (default), `lclaude` chooses in this order:
 3. Else Ollama (auto-start `ollama serve` if needed)
 4. Else a short error with next steps
 
-Then it points `claude` at localhost (`ANTHROPIC_BASE_URL` + dummy token; strips `ANTHROPIC_API_KEY`), and on exit
-restores `~/.claude/settings.json` and stops any llama-server it started.
+Then it points `claude` at localhost and removes conflicting cloud/proxy routing settings (including
+[Portkey](https://portkey.ai/) credentials and custom Anthropic headers) from the temporary Claude settings and child
+environment. On exit it restores `~/.claude/settings.json` and stops any llama-server it started.
 
 No proxy — traffic goes straight from `claude` to the local Anthropic-compatible endpoint.
 
