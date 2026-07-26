@@ -27,6 +27,9 @@ from typing import Any
 import lclaude
 
 
+__version__ = "0.4.0"
+
+
 QUICK_PROMPT = (
     "Explain, in two concise paragraphs, how a command-line tool should "
     "measure local LLM inference performance. Include one practical caveat."
@@ -520,7 +523,10 @@ def print_bench_header(
     if controls:
         workload += "  ·  " + "  ·  ".join(controls)
 
-    print(lclaude._box_top("LCLAUDE-BENCH", width, accent, reset), file=stream)
+    print(
+        lclaude._box_top(f"LCLAUDE-BENCH v{__version__}", width, accent, reset),
+        file=stream,
+    )
     print(
         _bench_header_row("Model", model, width, dim=dim, accent=accent, reset=reset),
         file=stream,
