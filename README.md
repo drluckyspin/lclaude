@@ -214,7 +214,7 @@ Notes for `--backend llamacpp`:
 
 ## Benchmark Ollama and llama.cpp
 
-![alt text](benchmark.png)
+![Example lclaude benchmark comparison output](benchmark.png)
 
 `lclaude-bench.py` is a VERY basic utility that compares the raw streaming `POST /v1/messages` inference path used by
 `lclaude`. It does not launch `claude`, patch `~/.claude/settings.json`, or write `~/.config/lclaude/config.toml`.

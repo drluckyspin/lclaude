@@ -129,6 +129,7 @@ BACKEND_OLLAMA = "ollama"
 BACKEND_LLAMACPP = "llamacpp"
 BACKEND_MANAGED = "managed"
 BACKEND_AUTO = "auto"
+BACKEND_UNAVAILABLE = "unavailable"
 DEFAULT_PORTS = {
     BACKEND_OLLAMA: 11434,
     BACKEND_LLAMACPP: 8080,
@@ -1144,6 +1145,8 @@ def resolve_backend(
     *,
     ollama_port: int,
     llamacpp_port: int,
+    auto_start: bool = True,
+    require_model: bool = True,
 ) -> str | None:
     """Pick the best backend for *model* given what is available locally.
 
@@ -1153,20 +1156,25 @@ def resolve_backend(
          ``llama-server`` is on PATH, and Ollama has the model
       3. Ollama (auto-start if installed)
       4. None
+
+    Set *auto_start* to False for status-only checks. Set *require_model* to
+    False when selecting a prospective backend without validating model state.
     """
     ok_cpp, ver_cpp = _is_llamacpp_reachable(llamacpp_port)
     if (
         (ok_cpp or ver_cpp == "loading")
         and not _llamacpp_template_rejects_late_system_messages(llamacpp_port)
     ):
+        global _BACKEND_VERSION
+        _BACKEND_VERSION = ver_cpp
         return BACKEND_LLAMACPP
 
     if _model_needs_template_patch(model) and shutil.which("llama-server"):
-        ok_ollama, _ = check_ollama(ollama_port, auto_start=True)
-        if ok_ollama and _ollama_has_model(model):
+        ok_ollama, _ = check_ollama(ollama_port, auto_start=auto_start)
+        if ok_ollama and (not require_model or _ollama_has_model(model)):
             return BACKEND_MANAGED
 
-    ok_ollama, _ = check_ollama(ollama_port, auto_start=True)
+    ok_ollama, _ = check_ollama(ollama_port, auto_start=auto_start)
     if ok_ollama:
         return BACKEND_OLLAMA
 
@@ -1278,6 +1286,8 @@ def _engine_label(backend: str) -> str:
     """Return the inference engine label for a resolved backend."""
     if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
         return "llama.cpp"
+    if backend == BACKEND_UNAVAILABLE:
+        return "unavailable"
     return "Ollama"
 
 
@@ -1287,6 +1297,8 @@ def _mode_label(backend: str) -> str:
         return "managed"
     if backend == BACKEND_LLAMACPP:
         return "external"
+    if backend == BACKEND_UNAVAILABLE:
+        return "unavailable"
     return "Ollama"
 
 
@@ -1295,7 +1307,7 @@ def _print_header(
     backend: str,
     backend_ver: str,
     model: str,
-    port: int,
+    port: int | None,
     installed_models: list[str] | None = None,
     *,
     log_file: Path | None = None,
@@ -1319,7 +1331,8 @@ def _print_header(
     engine = f"{dim}Engine:{reset} {value}{engine_label} v{backend_ver}{reset}"
     mode = f"{dim}Mode:{reset} {value}{mode_label}{reset}"
     model_info = f"{dim}Model:{reset} {value}{model}{reset}"
-    api_info = f"{dim}API:{reset} {value}http://localhost:{port}{reset}"
+    api = f"http://localhost:{port}" if port is not None else "unavailable"
+    api_info = f"{dim}API:{reset} {value}{api}{reset}"
     summary = "  ·  ".join((selection, engine, mode, model_info, api_info))
 
     print(_box_top(f"LCLAUDE v{__version__}", width, border, reset), file=sys.stdout)
@@ -1488,8 +1501,19 @@ def main(argv: list[str]) -> int:
             model,
             ollama_port=ollama_port,
             llamacpp_port=llamacpp_port,
+            auto_start=not is_version,
+            require_model=not is_version,
         )
         if detected is None:
+            if is_version:
+                _print_header(
+                    requested_backend,
+                    BACKEND_UNAVAILABLE,
+                    "unknown",
+                    model,
+                    None,
+                )
+                return 0
             print(
                 "Error: no local LLM backend available.\n"
                 f"  • No healthy llama-server on port {llamacpp_port}\n"
@@ -1509,13 +1533,29 @@ def main(argv: list[str]) -> int:
     else:
         port = explicit_port or DEFAULT_PORTS[backend]
 
+    # --version reports the selected local route without starting Ollama,
+    # validating a model, writing config, or launching a managed server.
+    if is_version:
+        if backend == BACKEND_MANAGED:
+            backend_ver = _get_llamacpp_binary_version() or "unknown"
+        elif backend == BACKEND_OLLAMA:
+            check_ollama(port, auto_start=False)
+            backend_ver = _BACKEND_VERSION
+        else:
+            _, backend_ver = _is_llamacpp_reachable(port)
+        _print_header(
+            requested_backend,
+            backend,
+            backend_ver,
+            model,
+            port,
+        )
+        return 0
+
     # --- Pre-flight checks (backend-specific) ---
     installed_models: list[str] | None = None
     server_proc: subprocess.Popen[Any] | None = None
-    show_header = (
-        (sys.stdout.isatty() and not _is_print_mode(claude_argv))
-        or is_version
-    )
+    show_header = sys.stdout.isatty() and not _is_print_mode(claude_argv)
 
     if backend == BACKEND_OLLAMA:
         ok, reason = check_ollama(port, auto_start=True)
@@ -1570,8 +1610,6 @@ def main(argv: list[str]) -> int:
                 installed_models,
                 log_file=LLAMACPP_LOG_FILE,
             )
-        if is_version:
-            return 0
         server_proc = prepare_managed_backend(model, port)
 
     # Persist last-used *requested* prefs (keep backend=auto sticky when used).
@@ -1597,9 +1635,6 @@ def main(argv: list[str]) -> int:
                 else None
             ),
         )
-    if is_version:
-        _stop_process(server_proc)
-        return 0
     return run_claude(
         claude_argv,
         model,

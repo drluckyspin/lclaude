@@ -225,6 +225,62 @@ class BackendAndCleanupTests(unittest.TestCase):
         )
 
 
+class VersionStatusTests(unittest.TestCase):
+    def test_version_does_not_start_or_validate_managed_backend(self) -> None:
+        with (
+            mock.patch.object(lclaude, "load_config", return_value={}),
+            mock.patch.object(lclaude, "_print_header") as print_header,
+            mock.patch.object(
+                lclaude, "_get_llamacpp_binary_version", return_value="123-test"
+            ),
+            mock.patch.object(lclaude, "check_ollama") as check_ollama,
+            mock.patch.object(lclaude, "ensure_model_in_ollama") as ensure_model,
+            mock.patch.object(lclaude, "prepare_managed_backend") as prepare_managed,
+            mock.patch.object(lclaude, "save_config") as save_config,
+        ):
+            self.assertEqual(
+                lclaude.main(
+                    ["--backend", lclaude.BACKEND_MANAGED, "--model", "not-pulled", "--version"]
+                ),
+                0,
+            )
+
+        print_header.assert_called_once_with(
+            lclaude.BACKEND_MANAGED,
+            lclaude.BACKEND_MANAGED,
+            "123-test",
+            "not-pulled",
+            9090,
+        )
+        check_ollama.assert_not_called()
+        ensure_model.assert_not_called()
+        prepare_managed.assert_not_called()
+        save_config.assert_not_called()
+
+    def test_auto_version_resolves_without_starting_or_requiring_model(self) -> None:
+        with (
+            mock.patch.object(lclaude, "load_config", return_value={}),
+            mock.patch.object(
+                lclaude, "resolve_backend", return_value=lclaude.BACKEND_OLLAMA
+            ) as resolve_backend,
+            mock.patch.object(lclaude, "check_ollama", return_value=(False, "stopped"))
+            as check_ollama,
+            mock.patch.object(lclaude, "ensure_model_in_ollama") as ensure_model,
+            mock.patch.object(lclaude, "_print_header"),
+        ):
+            self.assertEqual(lclaude.main(["--model", "not-pulled", "--version"]), 0)
+
+        resolve_backend.assert_called_once_with(
+            "not-pulled",
+            ollama_port=11434,
+            llamacpp_port=8080,
+            auto_start=False,
+            require_model=False,
+        )
+        check_ollama.assert_called_once_with(11434, auto_start=False)
+        ensure_model.assert_not_called()
+
+
 class ConfigAndHeaderTests(IsolatedPathsTestCase):
     def test_config_round_trip_escapes_model_and_omits_default_port(self) -> None:
         lclaude.save_config(model='model\\"name', backend=lclaude.BACKEND_AUTO, port=None)
