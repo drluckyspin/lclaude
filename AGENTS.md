@@ -125,7 +125,8 @@ qwen35.rope.dimension_sections has wrong array length; expected 4, got 3
 
 Startup failure UX (`_managed_startup_failure_message`):
 
-1. Print LCLAUDE header **first** (version `…`, include Log path) before starting the server
+1. Print LCLAUDE header **first** (fast `llama-server --version` build if available; include Log path) before starting
+   the server
 2. On failure, print a short colored Cause / Hint / Try / Log block (parse cause via `_parse_llamacpp_load_error`)
 3. Do **not** dump raw multi-line llama-server logs to the terminal (log file is enough)
 
@@ -133,8 +134,14 @@ Log file: `LLAMACPP_LOG_FILE` = `~/.cache/lclaude/llama-server.log` (truncated e
 
 ### 4. Header labeling
 
-Managed **inference** is llama.cpp. The status box and terminal title should show **`llama.cpp`** (and llama-server
-`build_info` from `/props`), not the word `managed`. Distinguish modes by port (9090 vs 8080) and Log line.
+The status box and terminal title distinguish the user's selection from the resolved engine:
+
+- **Backend** — requested selection (`auto`, `ollama`, `llamacpp`, or `managed`)
+- **Engine** — actual inference engine and build (`Ollama` or `llama.cpp`)
+- **Mode** — `Ollama`, `external` (user server), or `managed` (lclaude-owned server)
+
+Managed inference therefore shows `Engine: llama.cpp`, not `Engine: managed`. Distinguish modes by the Mode field, API
+endpoint (`http://localhost:9090` vs `:8080`), and Log line.
 
 Version parsing: prefer `/props` field `build_info` (e.g. `b10090-7347430f4`); fall back to legacy `build_number` /
 `build_commit`.
@@ -165,6 +172,7 @@ Only parse lclaude flags with `argparse.ArgumentParser(add_help=False)` + `parse
 | `resolve_ollama_blob`              | Modelfile → blob path                                             |
 | `ensure_patched_template`          | Cache Claude-compatible Jinja                                     |
 | `start_llamacpp_server`            | Spawn llama-server → log file                                     |
+| `_get_llamacpp_binary_version`     | Fast pre-load `llama-server --version` build lookup               |
 | `wait_for_llamacpp`                | Health wait + early exit if process died                          |
 | `prepare_managed_backend`          | Blob + template + start + wait + template verify                  |
 | `_print_header`                    | Startup banner                                                    |
@@ -225,7 +233,15 @@ managed-server cleanup.
 
 ## Manual test checklist
 
+`make test` runs the offline behavioral suite with temporary files and mocks; it does not contact a backend or launch
+Claude Code.
+
 ```bash
+make format
+make test
+make run ARGS="--version"
+make bump-version 0.4.0
+
 python3 -c "import ast; ast.parse(open('lclaude.py').read())"
 python3 -c "import ast; ast.parse(open('lclaude-bench.py').read())"
 
@@ -234,6 +250,7 @@ python3 lclaude.py --help
 python3 lclaude.py --backend managed --help
 python3 lclaude.py --list
 python3 lclaude.py --backend managed --list
+python3 lclaude.py --version  # prints local backend status; never launches Claude Code or a managed server
 
 # Config create/reuse
 rm -f ~/.config/lclaude/config.toml

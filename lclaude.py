@@ -118,6 +118,8 @@ from typing import Any
 
 logger = logging.getLogger("lclaude")
 
+__version__ = "0.4.0"
+
 # Path to Claude Code's settings file and its backup copy
 SETTINGS = Path.home() / ".claude" / "settings.json"
 SETTINGS_OFF = SETTINGS.with_name(SETTINGS.name + ".off")
@@ -285,6 +287,7 @@ def run_claude(
     model: str,
     *,
     backend: str,
+    requested_backend: str,
     port: int,
     backend_ver: str | None = None,
     server_proc: subprocess.Popen[Any] | None = None,
@@ -301,10 +304,8 @@ def run_claude(
     ensure_settings_file()
     backup_settings()
 
-    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
-        backend_label = "llama.cpp"
-    else:
-        backend_label = "Ollama"
+    engine_label = _engine_label(backend)
+    mode_label = _mode_label(backend)
     interactive = (
         sys.stdin.isatty()
         and sys.stdout.isatty()
@@ -341,7 +342,8 @@ def run_claude(
         apply_attribution_patch()
         if interactive:
             _set_terminal_title(
-                f"lclaude · {model} · {backend_label} v{backend_ver}"
+                f"lclaude · {model} · {requested_backend} → "
+                f"{engine_label} v{backend_ver} · {mode_label}"
             )
         return subprocess.run(
             ["claude", "--model", model, *claude_argv],
@@ -824,6 +826,28 @@ def start_llamacpp_server(
     return proc
 
 
+def _get_llamacpp_binary_version() -> str | None:
+    """Return the installed llama-server build without loading a model."""
+    llama_bin = shutil.which("llama-server")
+    if llama_bin is None:
+        return None
+    try:
+        result = subprocess.run(
+            [llama_bin, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"version:\s*(\d+)\s*\(([^)]+)\)", output)
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}"
+
+
 def wait_for_llamacpp(
     port: int,
     timeout: int = LLAMACPP_STARTUP_TIMEOUT,
@@ -1250,7 +1274,24 @@ def _box_bottom(width: int, border: str, reset: str) -> str:
     return f"{border}╰{'─' * (width - 2)}╯{reset}"
 
 
+def _engine_label(backend: str) -> str:
+    """Return the inference engine label for a resolved backend."""
+    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
+        return "llama.cpp"
+    return "Ollama"
+
+
+def _mode_label(backend: str) -> str:
+    """Return how lclaude is connected to the resolved backend."""
+    if backend == BACKEND_MANAGED:
+        return "managed"
+    if backend == BACKEND_LLAMACPP:
+        return "external"
+    return "Ollama"
+
+
 def _print_header(
+    requested_backend: str,
     backend: str,
     backend_ver: str,
     model: str,
@@ -1259,8 +1300,7 @@ def _print_header(
     *,
     log_file: Path | None = None,
 ) -> None:
-    """Print a boxed header (Claude Code-style) with backend info, model, and
-    optionally installed models (Ollama only) and a server log path."""
+    """Print a boxed header with selection, engine, model, and server details."""
     cols, _ = shutil.get_terminal_size((80, 20))
     width = max(cols, 40)
     inner_w = width - 2
@@ -1273,20 +1313,32 @@ def _print_header(
     else:
         dim = reset = border = value = ""
 
-    title = "LCLAUDE"
-    # Managed mode runs inference via llama-server; show that engine (and its build) in the UI.
-    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
-        backend_label = "llama.cpp"
-    else:
-        backend_label = "Ollama"
-    info_line = (
-        f" {dim}{backend_label}:{reset} {value}v{backend_ver}{reset}"
-        f"  {dim}Model:{reset} {value}{model}{reset}"
-        f"  {dim}Port:{reset} {value}{port}{reset}"
-    )
+    engine_label = _engine_label(backend)
+    mode_label = _mode_label(backend)
+    selection = f"{dim}Backend:{reset} {value}{requested_backend}{reset}"
+    engine = f"{dim}Engine:{reset} {value}{engine_label} v{backend_ver}{reset}"
+    mode = f"{dim}Mode:{reset} {value}{mode_label}{reset}"
+    model_info = f"{dim}Model:{reset} {value}{model}{reset}"
+    api_info = f"{dim}API:{reset} {value}http://localhost:{port}{reset}"
+    summary = "  ·  ".join((selection, engine, mode, model_info, api_info))
 
-    print(_box_top(title, width, border, reset), file=sys.stdout)
-    print(_box_row(info_line, width, border, reset), file=sys.stdout)
+    print(_box_top(f"LCLAUDE v{__version__}", width, border, reset), file=sys.stdout)
+    if _visible_len(summary) <= inner_w - 1:
+        print(_box_row(f" {summary}", width, border, reset), file=sys.stdout)
+    else:
+        print(
+            _box_row(f" {selection}  ·  {engine}", width, border, reset),
+            file=sys.stdout,
+        )
+        print(
+            _box_row(
+                f" {mode}  ·  {model_info}  ·  {api_info}",
+                width,
+                border,
+                reset,
+            ),
+            file=sys.stdout,
+        )
 
     if installed_models:
         models_str = ", ".join(installed_models)
@@ -1377,6 +1429,7 @@ def main(argv: list[str]) -> int:
         explicit_port = cfg_port
 
     is_help = any(arg in ("-h", "--help") for arg in argv)
+    is_version = any(arg == "--version" for arg in argv)
 
     # --- Help early-exit (no backend required) ---
     if is_help:
@@ -1392,6 +1445,7 @@ def main(argv: list[str]) -> int:
             "  --backend BACKEND    ollama, llamacpp, managed, or auto (default: auto)\n"
             "  --port PORT          Override backend port (default: 11434/8080/9090)\n"
             "  --list               List models available in Ollama and exit\n"
+            "  --version            Show local backend status and exit\n"
             "  --model MODEL        Model to use (default: ornith:35b or last-used)\n"
             "                       Ollama/managed: must be pulled. llama.cpp: label.\n"
             "\n"
@@ -1459,8 +1513,8 @@ def main(argv: list[str]) -> int:
     installed_models: list[str] | None = None
     server_proc: subprocess.Popen[Any] | None = None
     show_header = (
-        sys.stdout.isatty()
-        and not _is_print_mode(claude_argv)
+        (sys.stdout.isatty() and not _is_print_mode(claude_argv))
+        or is_version
     )
 
     if backend == BACKEND_OLLAMA:
@@ -1504,16 +1558,20 @@ def main(argv: list[str]) -> int:
         installed_models = ensure_model_in_ollama(model)
 
         # Show the banner before starting llama-server so failures still
-        # appear under a familiar LCLAUDE header.
+        # appear under a familiar LCLAUDE header. Querying --version is fast
+        # and avoids printing a second full header after model load.
         if show_header:
             _print_header(
+                requested_backend,
                 backend,
-                "…",
+                _get_llamacpp_binary_version() or "…",
                 model,
                 port,
                 installed_models,
                 log_file=LLAMACPP_LOG_FILE,
             )
+        if is_version:
+            return 0
         server_proc = prepare_managed_backend(model, port)
 
     # Persist last-used *requested* prefs (keep backend=auto sticky when used).
@@ -1523,12 +1581,11 @@ def main(argv: list[str]) -> int:
         port=explicit_port,
     )
 
-    # Show a startup banner only when connected to a real terminal.
-    # Session context also lives in the terminal tab title while Claude runs.
-    # Managed already printed a preliminary banner before llama-server start;
-    # reprint with the real llama.cpp build once the server is healthy.
-    if show_header:
+    # Managed already printed its banner before server startup. Other backends
+    # print after their pre-flight completes.
+    if show_header and backend != BACKEND_MANAGED:
         _print_header(
+            requested_backend,
             backend,
             _BACKEND_VERSION,
             model,
@@ -1540,10 +1597,14 @@ def main(argv: list[str]) -> int:
                 else None
             ),
         )
+    if is_version:
+        _stop_process(server_proc)
+        return 0
     return run_claude(
         claude_argv,
         model,
         backend=backend,
+        requested_backend=requested_backend,
         port=port,
         backend_ver=_BACKEND_VERSION,
         server_proc=server_proc,

@@ -105,6 +105,7 @@ LCLAUDE_MODEL=ornith:35b lclaude
 ```bash
 lclaude                                    # auto + last-used / default model
 lclaude --help
+lclaude --version                          # local backend status; does not start Claude or a managed server
 lclaude --list                             # list Ollama models
 lclaude --model ornith:35b
 lclaude --backend ollama
@@ -121,6 +122,7 @@ lclaude -p "explain this file"             # args after lclaude flags go to clau
 | `--port`       | Override listen port                                                              | 11434 / 8080 / 9090 |
 | `--model`      | Model name (must exist in Ollama for `ollama`/`managed`; cosmetic for `llamacpp`) | `ornith:35b`        |
 | `--list`       | List Ollama models (`ollama` / `managed` / `auto`)                                | —                   |
+| `--version`    | Show local backend status without launching Claude Code or a managed server       | —                   |
 | `-h`, `--help` | Show help                                                                         | —                   |
 
 ## Backends: which should I use?
@@ -212,8 +214,10 @@ Notes for `--backend llamacpp`:
 
 ## Benchmark Ollama and llama.cpp
 
-`lclaude-bench.py` compares the raw streaming `POST /v1/messages` inference path used by `lclaude`. It does not launch
-`claude`, patch `~/.claude/settings.json`, or write `~/.config/lclaude/config.toml`.
+![alt text](benchmark.png)
+
+`lclaude-bench.py` is a VERY basic utility that compares the raw streaming `POST /v1/messages` inference path used by
+`lclaude`. It does not launch `claude`, patch `~/.claude/settings.json`, or write `~/.config/lclaude/config.toml`.
 
 ```bash
 python3 lclaude-bench.py
@@ -297,6 +301,19 @@ warmups, sequential runs, and optionally `--unload-between` to make a comparison
 
 > [!TIP]
 > First load into memory can be slow; later sessions are faster.
+
+## Development
+
+```bash
+make format
+make test
+make run ARGS="--version"
+make bump-version 0.4.0
+```
+
+`make bump-version <version>` updates `VERSION` and synchronizes the internal `__version__` variable in every Python
+script. `make test` runs offline behavioral tests with temporary files and mocks; it never contacts a local backend or
+launches Claude Code.
 
 ## License
 
