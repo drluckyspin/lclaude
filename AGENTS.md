@@ -68,7 +68,9 @@ Claude Code speaks the **Anthropic Messages API**. Both **Ollama** (since ~Jan 2
 - `ANTHROPIC_AUTH_TOKEN=lclaude`
 - `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` — required so Claude Code does not wipe the LCLAUDE banner (alt-screen TUI
   since Claude Code ~v2.1.89)
-- **`ANTHROPIC_API_KEY` is stripped** so the SDK does not prefer cloud Anthropic over `BASE_URL`
+- Cloud/proxy routing variables are stripped: `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `PORTKEY_API_KEY`,
+  `CLAUDE_CODE_USE_BEDROCK`, and `CLAUDE_CODE_USE_VERTEX`
+- `ANTHROPIC_BASE_URL` is also removed from temporary `settings.json`; the child env then sets lclaude's localhost URL
 
 ### Settings lifecycle
 
