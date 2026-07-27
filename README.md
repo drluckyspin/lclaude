@@ -40,8 +40,8 @@ lclaude
 lclaude --model ornith:35b
 ```
 
-After a successful start, prefs are saved to `~/.config/lclaude/config.toml` so the next bare `lclaude` reuses
-your last model and backend.
+After a successful start, prefs are saved to `~/.config/lclaude/config.toml` so the next bare `lclaude` reuses your last
+model and backend.
 
 > [!NOTE]
 > Ornith’s embedded Qwen 3.6 template rejects system messages after the first turn — that breaks `claude` tool use with
@@ -90,7 +90,8 @@ backend = "auto"
 
 **Precedence:** CLI flags → `LCLAUDE_MODEL` / `LCLAUDE_BACKEND` / `LCLAUDE_PORT` → config → built-in defaults.
 
-When you run with `backend = "auto"`, that preference is what gets saved (not the resolved engine). Edit the file or override for one run:
+When you run with `backend = "auto"`, that preference is what gets saved (not the resolved engine). Edit the file or
+override for one run:
 
 ```bash
 lclaude --backend ollama
