@@ -27,7 +27,7 @@ from typing import Any
 import lclaude
 
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 QUICK_PROMPT = (

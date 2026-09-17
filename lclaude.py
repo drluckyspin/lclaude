@@ -118,7 +118,7 @@ from typing import Any
 
 logger = logging.getLogger("lclaude")
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # Path to Claude Code's settings file and its backup copy
 SETTINGS = Path.home() / ".claude" / "settings.json"
@@ -177,6 +177,9 @@ SETTINGS_ROUTING_ENV_DENYLIST = (
     "ANTHROPIC_BASE_URL",
     *ROUTING_ENV_DENYLIST,
 )
+
+# Claude Code's assumed-context-window override for models outside its catalog
+CONTEXT_WINDOW_ENV = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 
 # ANSI accents for the status box, help headings, and failure messages
 HEADER_ACCENT = "\x1b[92m"  # bright green
@@ -271,7 +274,7 @@ def apply_attribution_patch() -> None:
     save_settings(SETTINGS, data)
 
 
-def build_child_env(_backend: str, port: int) -> dict[str, str]:
+def build_child_env(backend: str, port: int, model: str) -> dict[str, str]:
     """Build the environment for the claude subprocess.
 
     Start from the parent env, remove cloud/proxy routing variables, then
@@ -289,6 +292,13 @@ def build_child_env(_backend: str, port: int) -> dict[str, str]:
         # selection / copy-paste / Cmd-F keep working.
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
     })
+    # Since v2.1.223 Claude Code compacts unknown model ids at an assumed 200k
+    # window. Declaring the real one keeps auto-compact aligned with the
+    # backend; an explicit user value always wins.
+    if CONTEXT_WINDOW_ENV not in env:
+        context_window = resolve_context_window(backend, model, port)
+        if context_window is not None:
+            env[CONTEXT_WINDOW_ENV] = str(context_window)
     return env
 
 
@@ -373,7 +383,7 @@ def run_claude(
             )
         return subprocess.run(
             ["claude", "--model", model, *claude_argv],
-            env=build_child_env(backend, port),
+            env=build_child_env(backend, port, model),
             check=False,
         ).returncode
     finally:
@@ -596,6 +606,127 @@ def _get_llamacpp_version(port: int) -> str:
     if build_commit:
         return str(build_commit)[:8]
     return "unknown"
+
+
+def _positive_int(value: Any) -> int | None:
+    """Return *value* only when it is a genuine positive int.
+
+    ``bool`` subclasses ``int``, so an ``isinstance`` check would accept a
+    malformed ``{"n_ctx": true}`` and export it as the string ``True``.
+    """
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
+def _get_llamacpp_context_length(port: int) -> int | None:
+    """Return the context window llama-server is actually serving."""
+    props = _get_llamacpp_props(port)
+    if props is None:
+        return None
+    candidates = [props.get("n_ctx")]
+    generation = props.get("default_generation_settings")
+    if isinstance(generation, dict):
+        candidates.append(generation.get("n_ctx"))
+    for value in candidates:
+        window = _positive_int(value)
+        if window is not None:
+            return window
+    return None
+
+
+def _ollama_request(
+    port: int,
+    method: str,
+    path: str,
+    body: str | None = None,
+) -> dict[str, Any] | None:
+    """Call an Ollama endpoint and decode a JSON object response."""
+    try:
+        conn = http.client.HTTPConnection("localhost", port, timeout=3)
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(method, path, body, headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            conn.close()
+            return None
+        raw = resp.read().decode()
+        conn.close()
+        data = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _ollama_names_match(requested: str, running: str) -> bool:
+    """Match a requested Ollama model name against a loaded one.
+
+    An untagged request matches any tag (``llama3.1`` ≙ ``llama3.1:latest``),
+    while an explicit tag must agree exactly.
+    """
+    if requested == running:
+        return True
+    if ":" in requested:
+        return False
+    return running.rsplit(":", 1)[0] == requested
+
+
+def _get_ollama_running_context_length(model: str, port: int) -> int | None:
+    """Return the window *model* is running with, if Ollama has it loaded."""
+    data = _ollama_request(port, "GET", "/api/ps")
+    if data is None:
+        return None
+    running = data.get("models")
+    if not isinstance(running, list):
+        return None
+    for entry in running:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("model") or entry.get("name")
+        if isinstance(name, str) and _ollama_names_match(model, name):
+            return _positive_int(entry.get("context_length"))
+    return None
+
+
+def _get_ollama_context_length(model: str, port: int) -> int | None:
+    """Return the context window Ollama will serve for *model*.
+
+    A loaded model reports the window it is actually running with, which is
+    authoritative. Otherwise fall back to the trained window from
+    ``/api/show``, capped by ``OLLAMA_CONTEXT_LENGTH`` when that limit is
+    visible to us, so we never claim more room than the endpoint serves.
+    """
+    running = _get_ollama_running_context_length(model, port)
+    if running is not None:
+        return running
+
+    data = _ollama_request(port, "POST", "/api/show", json.dumps({"model": model}))
+    if data is None:
+        return None
+    info = data.get("model_info")
+    if not isinstance(info, dict):
+        return None
+    arch = info.get("general.architecture")
+    if not isinstance(arch, str):
+        return None
+    trained = _positive_int(info.get(f"{arch}.context_length"))
+    if trained is None:
+        return None
+
+    limit = _positive_int(_env_int("OLLAMA_CONTEXT_LENGTH"))
+    return min(trained, limit) if limit is not None else trained
+
+
+def resolve_context_window(backend: str, model: str, port: int) -> int | None:
+    """Return the context window the resolved backend serves, if detectable.
+
+    Claude Code assumes 200k tokens for any model outside its own catalog, so
+    a local model is compacted at the wrong point unless we declare the real
+    window. Returns None when the backend cannot report one.
+    """
+    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
+        return _get_llamacpp_context_length(port)
+    return _get_ollama_context_length(model, port)
 
 
 def _llamacpp_template_rejects_late_system_messages(port: int) -> bool:
