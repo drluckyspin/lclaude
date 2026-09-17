@@ -51,6 +51,44 @@ class FakeProcess:
         self.killed += 1
 
 
+def fake_ollama(routes: dict[str, object]) -> mock._patch:
+    """Patch HTTPConnection so each Ollama path returns its own JSON payload.
+
+    Paths absent from *routes* answer 404, which is how a real daemon reports
+    an endpoint it cannot serve.
+    """
+
+    def connect(*_args: object, **_kwargs: object) -> mock.Mock:
+        conn = mock.Mock()
+        requested: dict[str, str] = {}
+
+        def request(_method: str, path: str, *_rest: object, **_kw: object) -> None:
+            requested["path"] = path
+
+        def getresponse() -> mock.Mock:
+            payload = routes.get(requested.get("path", ""))
+            response = mock.Mock()
+            response.status = 200 if payload is not None else 404
+            response.read.return_value = json.dumps(payload).encode()
+            return response
+
+        conn.request.side_effect = request
+        conn.getresponse.side_effect = getresponse
+        return conn
+
+    return mock.patch.object(lclaude.http.client, "HTTPConnection", side_effect=connect)
+
+
+def ollama_show(architecture: str, context_length: object) -> dict[str, object]:
+    """Build an ``/api/show`` payload advertising a trained context window."""
+    return {
+        "model_info": {
+            "general.architecture": architecture,
+            f"{architecture}.context_length": context_length,
+        }
+    }
+
+
 class IsolatedPathsTestCase(unittest.TestCase):
     """Patch module-level paths so tests never touch user configuration."""
 
@@ -183,6 +221,13 @@ class SettingsLifecycleTests(IsolatedPathsTestCase):
 
 
 class BackendAndCleanupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A developer's own OLLAMA_CONTEXT_LENGTH must not cap test expectations.
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("OLLAMA_CONTEXT_LENGTH", None)
+
     def test_resolve_backend_prefers_usable_external_llamacpp(self) -> None:
         with (
             mock.patch.object(
@@ -297,6 +342,74 @@ class BackendAndCleanupTests(unittest.TestCase):
                 ),
                 262144,
             )
+
+    def test_context_window_prefers_the_window_a_loaded_model_is_serving(self) -> None:
+        routes = {
+            "/api/ps": {"models": [{"model": "ornith:35b", "context_length": 8192}]},
+            "/api/show": ollama_show("qwen35moe", 262144),
+        }
+        with fake_ollama(routes):
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                ),
+                8192,
+            )
+
+    def test_context_window_ignores_a_different_loaded_model(self) -> None:
+        routes = {
+            "/api/ps": {"models": [{"model": "llama3.1:latest", "context_length": 8192}]},
+            "/api/show": ollama_show("qwen35moe", 262144),
+        }
+        with fake_ollama(routes):
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                ),
+                262144,
+            )
+
+    def test_context_window_caps_trained_length_by_ollama_runtime_limit(self) -> None:
+        routes = {"/api/show": ollama_show("qwen35moe", 262144)}
+        with fake_ollama(routes), mock.patch.dict(
+            os.environ, {"OLLAMA_CONTEXT_LENGTH": "32768"}
+        ):
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                ),
+                32768,
+            )
+
+        # A limit above the trained window must not inflate it.
+        with fake_ollama(routes), mock.patch.dict(
+            os.environ, {"OLLAMA_CONTEXT_LENGTH": "999999"}
+        ):
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                ),
+                262144,
+            )
+
+    def test_context_window_rejects_non_integer_backend_values(self) -> None:
+        # bool subclasses int, so a malformed payload must not become "True".
+        for bogus in (True, "262144", 0, -1, None):
+            with mock.patch.object(
+                lclaude, "_get_llamacpp_props", return_value={"n_ctx": bogus}
+            ):
+                self.assertIsNone(
+                    lclaude.resolve_context_window(
+                        lclaude.BACKEND_MANAGED, "ornith:35b", 9090
+                    )
+                )
+
+            with fake_ollama({"/api/show": ollama_show("qwen35moe", bogus)}):
+                self.assertIsNone(
+                    lclaude.resolve_context_window(
+                        lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                    )
+                )
 
     def test_context_window_is_none_when_backend_cannot_report(self) -> None:
         with mock.patch.object(lclaude, "_get_llamacpp_props", return_value=None):

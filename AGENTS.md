@@ -166,16 +166,23 @@ Claude Code v2.1.223+ assumes **200k tokens** for any model id outside its catal
 auto-compacts at that assumed size. `resolve_context_window` reads the real window and `build_child_env` declares it via
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`:
 
-| Backend                | Source                                                      |
-| ---------------------- | ----------------------------------------------------------- |
-| `ollama`               | `/api/show` → `model_info[<arch>.context_length]`           |
-| `managed` / `llamacpp` | `/props` → `n_ctx` (or `default_generation_settings.n_ctx`) |
+| Backend                | Source                                                                     |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `ollama`               | `/api/ps` served window if loaded, else `/api/show` trained window, capped |
+| `managed` / `llamacpp` | `/props` → `n_ctx` (or `default_generation_settings.n_ctx`)                |
 
 Rules that make the variable apply (per Anthropic docs): the id must not start with `claude-` and must not contain
 `[1m]`. Local ids such as `ornith:35b` satisfy both, so the declared window takes effect directly.
 
+Ollama's trained window is an upper bound, not a promise: `OLLAMA_CONTEXT_LENGTH` or an explicit `num_ctx` can make the
+daemon serve less. Overstating is the dangerous direction (Claude Code would exceed the real window), so `/api/ps` wins
+when the model is loaded and `OLLAMA_CONTEXT_LENGTH` caps the `/api/show` fallback. Understating is safe — it only
+compacts earlier.
+
 - Never overwrite a user-exported `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
 - Detection must be non-fatal — return `None` and stay silent when the backend cannot report a window
+- Validate with `_positive_int` (`type(value) is int`), not `isinstance` — `bool` is an `int` subclass and would be
+  exported as the string `True`
 - A declared window above 200k makes Claude Code print its own "200k not enforced" startup notice; that is expected
 - `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` is the user-side alternative (no proactive compaction); do
   not set it automatically

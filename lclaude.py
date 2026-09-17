@@ -608,6 +608,17 @@ def _get_llamacpp_version(port: int) -> str:
     return "unknown"
 
 
+def _positive_int(value: Any) -> int | None:
+    """Return *value* only when it is a genuine positive int.
+
+    ``bool`` subclasses ``int``, so an ``isinstance`` check would accept a
+    malformed ``{"n_ctx": true}`` and export it as the string ``True``.
+    """
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
 def _get_llamacpp_context_length(port: int) -> int | None:
     """Return the context window llama-server is actually serving."""
     props = _get_llamacpp_props(port)
@@ -618,25 +629,23 @@ def _get_llamacpp_context_length(port: int) -> int | None:
     if isinstance(generation, dict):
         candidates.append(generation.get("n_ctx"))
     for value in candidates:
-        if isinstance(value, int) and value > 0:
-            return value
+        window = _positive_int(value)
+        if window is not None:
+            return window
     return None
 
 
-def _get_ollama_context_length(model: str, port: int) -> int | None:
-    """Return *model*'s context window from Ollama's ``/api/show``.
-
-    Ollama reports the trained window under ``<architecture>.context_length``
-    and serves that full window unless ``OLLAMA_CONTEXT_LENGTH`` narrows it.
-    """
+def _ollama_request(
+    port: int,
+    method: str,
+    path: str,
+    body: str | None = None,
+) -> dict[str, Any] | None:
+    """Call an Ollama endpoint and decode a JSON object response."""
     try:
         conn = http.client.HTTPConnection("localhost", port, timeout=3)
-        conn.request(
-            "POST",
-            "/api/show",
-            json.dumps({"model": model}),
-            {"Content-Type": "application/json"},
-        )
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(method, path, body, headers)
         resp = conn.getresponse()
         if resp.status != 200:
             conn.close()
@@ -646,15 +655,66 @@ def _get_ollama_context_length(model: str, port: int) -> int | None:
         data = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
-    info = data.get("model_info") if isinstance(data, dict) else None
+
+def _ollama_names_match(requested: str, running: str) -> bool:
+    """Match a requested Ollama model name against a loaded one.
+
+    An untagged request matches any tag (``llama3.1`` ≙ ``llama3.1:latest``),
+    while an explicit tag must agree exactly.
+    """
+    if requested == running:
+        return True
+    if ":" in requested:
+        return False
+    return running.rsplit(":", 1)[0] == requested
+
+
+def _get_ollama_running_context_length(model: str, port: int) -> int | None:
+    """Return the window *model* is running with, if Ollama has it loaded."""
+    data = _ollama_request(port, "GET", "/api/ps")
+    if data is None:
+        return None
+    running = data.get("models")
+    if not isinstance(running, list):
+        return None
+    for entry in running:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("model") or entry.get("name")
+        if isinstance(name, str) and _ollama_names_match(model, name):
+            return _positive_int(entry.get("context_length"))
+    return None
+
+
+def _get_ollama_context_length(model: str, port: int) -> int | None:
+    """Return the context window Ollama will serve for *model*.
+
+    A loaded model reports the window it is actually running with, which is
+    authoritative. Otherwise fall back to the trained window from
+    ``/api/show``, capped by ``OLLAMA_CONTEXT_LENGTH`` when that limit is
+    visible to us, so we never claim more room than the endpoint serves.
+    """
+    running = _get_ollama_running_context_length(model, port)
+    if running is not None:
+        return running
+
+    data = _ollama_request(port, "POST", "/api/show", json.dumps({"model": model}))
+    if data is None:
+        return None
+    info = data.get("model_info")
     if not isinstance(info, dict):
         return None
     arch = info.get("general.architecture")
     if not isinstance(arch, str):
         return None
-    value = info.get(f"{arch}.context_length")
-    return value if isinstance(value, int) and value > 0 else None
+    trained = _positive_int(info.get(f"{arch}.context_length"))
+    if trained is None:
+        return None
+
+    limit = _positive_int(_env_int("OLLAMA_CONTEXT_LENGTH"))
+    return min(trained, limit) if limit is not None else trained
 
 
 def resolve_context_window(backend: str, model: str, port: int) -> int | None:
