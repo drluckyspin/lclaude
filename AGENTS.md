@@ -71,6 +71,8 @@ Claude Code speaks the **Anthropic Messages API**. Both **Ollama** (since ~Jan 2
 - Cloud/proxy routing variables are stripped: `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `PORTKEY_API_KEY`,
   `CLAUDE_CODE_USE_BEDROCK`, and `CLAUDE_CODE_USE_VERTEX`
 - `ANTHROPIC_BASE_URL` is also removed from temporary `settings.json`; the child env then sets lclaude's localhost URL
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (`CONTEXT_WINDOW_ENV`) — the detected backend window; see below. Only set when the
+  user has not exported it and the backend reports one
 
 ### Settings lifecycle
 
@@ -158,6 +160,26 @@ Version parsing: prefer `/props` field `build_info` (e.g. `b10090-7347430f4`); f
 Only parse lclaude flags with `argparse.ArgumentParser(add_help=False)` + `parse_known_args`; remaining argv goes to
 `claude` unchanged. Flag defaults are `None` so merge can apply CLI > env > config > built-in.
 
+### 7. Unknown-model context window
+
+Claude Code v2.1.223+ assumes **200k tokens** for any model id outside its catalog — every local model — and
+auto-compacts at that assumed size. `resolve_context_window` reads the real window and `build_child_env` declares it via
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`:
+
+| Backend                | Source                                                      |
+| ---------------------- | ----------------------------------------------------------- |
+| `ollama`               | `/api/show` → `model_info[<arch>.context_length]`           |
+| `managed` / `llamacpp` | `/props` → `n_ctx` (or `default_generation_settings.n_ctx`) |
+
+Rules that make the variable apply (per Anthropic docs): the id must not start with `claude-` and must not contain
+`[1m]`. Local ids such as `ornith:35b` satisfy both, so the declared window takes effect directly.
+
+- Never overwrite a user-exported `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+- Detection must be non-fatal — return `None` and stay silent when the backend cannot report a window
+- A declared window above 200k makes Claude Code print its own "200k not enforced" startup notice; that is expected
+- `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` is the user-side alternative (no proactive compaction); do
+  not set it automatically
+
 ## Key functions (map)
 
 | Function                           | Role                                                              |
@@ -166,7 +188,8 @@ Only parse lclaude flags with `argparse.ArgumentParser(add_help=False)` + `parse
 | `load_config` / `save_config`      | `~/.config/lclaude/config.toml`                                   |
 | `resolve_backend`                  | Smart auto policy                                                 |
 | `run_claude`                       | Settings backup/patch, spawn claude, cleanup, stop owned server   |
-| `build_child_env`                  | Anthropic routing env                                             |
+| `build_child_env`                  | Anthropic routing env + declared context window                   |
+| `resolve_context_window`           | Detect the window the resolved backend serves                     |
 | `check_ollama` / `_start_and_wait` | Ollama health + auto-start                                        |
 | `check_llamacpp`                   | External llama-server health + template gate                      |
 | `_ollama_has_model`                | Non-fatal model presence check for auto                           |

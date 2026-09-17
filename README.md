@@ -73,6 +73,22 @@ environment. On exit it restores `~/.claude/settings.json` and stops any llama-s
 
 No proxy — traffic goes straight from `claude` to the local Anthropic-compatible endpoint.
 
+### Context window
+
+Claude Code v2.1.223+ assumes a 200k-token window for any model outside its own catalog, which is every local model. It
+then auto-compacts at that assumed size rather than the real one. `lclaude` reads the window the backend actually serves
+and passes it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`:
+
+| Backend             | Source                                        |
+| ------------------- | --------------------------------------------- |
+| Ollama              | `/api/show` → `<architecture>.context_length` |
+| llama.cpp / managed | `/props` → `n_ctx`                            |
+
+Setting `CLAUDE_CODE_MAX_CONTEXT_TOKENS` yourself overrides detection, and `lclaude` stays quiet if the backend cannot
+report a window. When the detected window exceeds 200k, Claude Code notes at startup that the 200k limit is not enforced
+— that notice is expected. To skip proactive compaction entirely instead, set
+`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`.
+
 ## Config (last used)
 
 Path: `~/.config/lclaude/config.toml`

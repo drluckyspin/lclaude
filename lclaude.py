@@ -178,6 +178,9 @@ SETTINGS_ROUTING_ENV_DENYLIST = (
     *ROUTING_ENV_DENYLIST,
 )
 
+# Claude Code's assumed-context-window override for models outside its catalog
+CONTEXT_WINDOW_ENV = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+
 # ANSI accents for the status box, help headings, and failure messages
 HEADER_ACCENT = "\x1b[92m"  # bright green
 ERROR_ACCENT = "\x1b[91m"  # bright red
@@ -271,7 +274,7 @@ def apply_attribution_patch() -> None:
     save_settings(SETTINGS, data)
 
 
-def build_child_env(_backend: str, port: int) -> dict[str, str]:
+def build_child_env(backend: str, port: int, model: str) -> dict[str, str]:
     """Build the environment for the claude subprocess.
 
     Start from the parent env, remove cloud/proxy routing variables, then
@@ -289,6 +292,13 @@ def build_child_env(_backend: str, port: int) -> dict[str, str]:
         # selection / copy-paste / Cmd-F keep working.
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
     })
+    # Since v2.1.223 Claude Code compacts unknown model ids at an assumed 200k
+    # window. Declaring the real one keeps auto-compact aligned with the
+    # backend; an explicit user value always wins.
+    if CONTEXT_WINDOW_ENV not in env:
+        context_window = resolve_context_window(backend, model, port)
+        if context_window is not None:
+            env[CONTEXT_WINDOW_ENV] = str(context_window)
     return env
 
 
@@ -373,7 +383,7 @@ def run_claude(
             )
         return subprocess.run(
             ["claude", "--model", model, *claude_argv],
-            env=build_child_env(backend, port),
+            env=build_child_env(backend, port, model),
             check=False,
         ).returncode
     finally:
@@ -596,6 +606,67 @@ def _get_llamacpp_version(port: int) -> str:
     if build_commit:
         return str(build_commit)[:8]
     return "unknown"
+
+
+def _get_llamacpp_context_length(port: int) -> int | None:
+    """Return the context window llama-server is actually serving."""
+    props = _get_llamacpp_props(port)
+    if props is None:
+        return None
+    candidates = [props.get("n_ctx")]
+    generation = props.get("default_generation_settings")
+    if isinstance(generation, dict):
+        candidates.append(generation.get("n_ctx"))
+    for value in candidates:
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _get_ollama_context_length(model: str, port: int) -> int | None:
+    """Return *model*'s context window from Ollama's ``/api/show``.
+
+    Ollama reports the trained window under ``<architecture>.context_length``
+    and serves that full window unless ``OLLAMA_CONTEXT_LENGTH`` narrows it.
+    """
+    try:
+        conn = http.client.HTTPConnection("localhost", port, timeout=3)
+        conn.request(
+            "POST",
+            "/api/show",
+            json.dumps({"model": model}),
+            {"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        if resp.status != 200:
+            conn.close()
+            return None
+        raw = resp.read().decode()
+        conn.close()
+        data = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    info = data.get("model_info") if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return None
+    arch = info.get("general.architecture")
+    if not isinstance(arch, str):
+        return None
+    value = info.get(f"{arch}.context_length")
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def resolve_context_window(backend: str, model: str, port: int) -> int | None:
+    """Return the context window the resolved backend serves, if detectable.
+
+    Claude Code assumes 200k tokens for any model outside its own catalog, so
+    a local model is compacted at the wrong point unless we declare the real
+    window. Returns None when the backend cannot report one.
+    """
+    if backend in (BACKEND_MANAGED, BACKEND_LLAMACPP):
+        return _get_llamacpp_context_length(port)
+    return _get_ollama_context_length(model, port)
 
 
 def _llamacpp_template_rejects_late_system_messages(port: int) -> bool:

@@ -138,18 +138,48 @@ class SettingsLifecycleTests(IsolatedPathsTestCase):
         self.assertEqual(server.waited, 1)
 
     def test_build_child_env_routes_locally_and_removes_cloud_key(self) -> None:
-        with mock.patch.dict(
-            lclaude.os.environ,
-            {"ANTHROPIC_API_KEY": "cloud-key", "KEEP_THIS": "yes"},
-            clear=True,
+        with (
+            mock.patch.dict(
+                lclaude.os.environ,
+                {"ANTHROPIC_API_KEY": "cloud-key", "KEEP_THIS": "yes"},
+                clear=True,
+            ),
+            mock.patch.object(lclaude, "resolve_context_window", return_value=None),
         ):
-            env = lclaude.build_child_env(lclaude.BACKEND_MANAGED, 9090)
+            env = lclaude.build_child_env(lclaude.BACKEND_MANAGED, 9090, "test-model")
 
         self.assertNotIn("ANTHROPIC_API_KEY", env)
         self.assertEqual(env["KEEP_THIS"], "yes")
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:9090")
         self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "lclaude")
         self.assertEqual(env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"], "1")
+        self.assertNotIn(lclaude.CONTEXT_WINDOW_ENV, env)
+
+    def test_build_child_env_declares_detected_context_window(self) -> None:
+        with (
+            mock.patch.dict(lclaude.os.environ, {}, clear=True),
+            mock.patch.object(
+                lclaude, "resolve_context_window", return_value=262144
+            ) as resolve,
+        ):
+            env = lclaude.build_child_env(lclaude.BACKEND_OLLAMA, 11434, "ornith:35b")
+
+        resolve.assert_called_once_with(lclaude.BACKEND_OLLAMA, "ornith:35b", 11434)
+        self.assertEqual(env[lclaude.CONTEXT_WINDOW_ENV], "262144")
+
+    def test_build_child_env_keeps_explicit_context_window(self) -> None:
+        with (
+            mock.patch.dict(
+                lclaude.os.environ,
+                {lclaude.CONTEXT_WINDOW_ENV: "8192"},
+                clear=True,
+            ),
+            mock.patch.object(lclaude, "resolve_context_window") as resolve,
+        ):
+            env = lclaude.build_child_env(lclaude.BACKEND_OLLAMA, 11434, "ornith:35b")
+
+        resolve.assert_not_called()
+        self.assertEqual(env[lclaude.CONTEXT_WINDOW_ENV], "8192")
 
 
 class BackendAndCleanupTests(unittest.TestCase):
@@ -223,6 +253,67 @@ class BackendAndCleanupTests(unittest.TestCase):
         self.assertFalse(
             lclaude.wait_for_llamacpp(9090, timeout=30, proc=FakeProcess(returncode=1))
         )
+
+    def test_context_window_reads_llamacpp_props_for_server_backends(self) -> None:
+        for backend in (lclaude.BACKEND_MANAGED, lclaude.BACKEND_LLAMACPP):
+            with mock.patch.object(
+                lclaude, "_get_llamacpp_props", return_value={"n_ctx": 262144}
+            ):
+                self.assertEqual(
+                    lclaude.resolve_context_window(backend, "ornith:35b", 9090),
+                    262144,
+                )
+
+        with mock.patch.object(
+            lclaude,
+            "_get_llamacpp_props",
+            return_value={"default_generation_settings": {"n_ctx": 32768}},
+        ):
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_LLAMACPP, "ornith:35b", 8080
+                ),
+                32768,
+            )
+
+    def test_context_window_reads_ollama_architecture_length(self) -> None:
+        payload = json.dumps(
+            {
+                "model_info": {
+                    "general.architecture": "qwen35moe",
+                    "qwen35moe.context_length": 262144,
+                }
+            }
+        )
+        with mock.patch.object(
+            lclaude.http.client, "HTTPConnection"
+        ) as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status = 200
+            response.read.return_value = payload.encode()
+            self.assertEqual(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                ),
+                262144,
+            )
+
+    def test_context_window_is_none_when_backend_cannot_report(self) -> None:
+        with mock.patch.object(lclaude, "_get_llamacpp_props", return_value=None):
+            self.assertIsNone(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_MANAGED, "ornith:35b", 9090
+                )
+            )
+
+        with mock.patch.object(
+            lclaude.http.client, "HTTPConnection", side_effect=OSError("refused")
+        ):
+            self.assertIsNone(
+                lclaude.resolve_context_window(
+                    lclaude.BACKEND_OLLAMA, "ornith:35b", 11434
+                )
+            )
 
 
 class VersionStatusTests(unittest.TestCase):
