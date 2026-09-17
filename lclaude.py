@@ -118,7 +118,7 @@ from typing import Any
 
 logger = logging.getLogger("lclaude")
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # Path to Claude Code's settings file and its backup copy
 SETTINGS = Path.home() / ".claude" / "settings.json"
